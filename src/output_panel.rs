@@ -1,9 +1,9 @@
-/// Output panel — a Window with a black background palette.
+/// Output panel — a Window with a black background via set_custom_palette().
 ///
-/// Uses the turbo-vision 1.0.4 owner chain palette traversal to override
-/// the Window's palette. App palette positions 64-71 are reserved for
-/// black-background window colors. The Window's get_palette() maps to
-/// those positions, and the Frame + all children resolve through it.
+/// Extends the app palette with black-background entries at positions 64-71,
+/// then sets the Window's custom palette to point there. The owner chain
+/// traversal in map_color() ensures the Frame and all children resolve
+/// through this palette automatically.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -12,17 +12,14 @@ use std::sync::Once;
 use turbo_vision::core::event::Event;
 use turbo_vision::core::geometry::Rect;
 use turbo_vision::core::palette::{palettes, Palette};
-use turbo_vision::core::state::StateFlags;
+use turbo_vision::core::state::{StateFlags, SF_SHADOW};
 use turbo_vision::terminal::Terminal;
 use turbo_vision::views::terminal_widget::TerminalWidget;
 use turbo_vision::views::view::{OwnerType, View};
 use turbo_vision::views::window::Window;
 
-/// App palette positions 64-71: black-background window colors.
 const BLACK_WINDOW_PALETTE_START: usize = 64;
 
-/// Attr bytes for the black window palette entries.
-/// Format: (fg << 0) | (bg << 4) using CGA color indices.
 const BLACK_WINDOW_ATTRS: [u8; 8] = [
     0x07, // 64: interior/background — LightGray on Black
     0x0F, // 65: frame active border — White on Black
@@ -34,16 +31,13 @@ const BLACK_WINDOW_ATTRS: [u8; 8] = [
     0x00, // 71: reserved
 ];
 
-/// Window palette that maps indices 1-8 to app palette positions 64-71.
 const CP_BLACK_WINDOW: [u8; 8] = [64, 65, 66, 67, 68, 69, 70, 71];
 
 static INIT_PALETTE: Once = Once::new();
 
-/// Extend the app palette with black window entries (idempotent).
 fn ensure_black_palette() {
     INIT_PALETTE.call_once(|| {
         let mut pal = palettes::get_app_palette();
-        // Extend to at least position 71 (index 71, 0-based 70)
         while pal.len() <= BLACK_WINDOW_PALETTE_START + BLACK_WINDOW_ATTRS.len() {
             pal.push(0);
         }
@@ -54,7 +48,7 @@ fn ensure_black_palette() {
     });
 }
 
-/// Rc wrapper so TerminalWidget can be both a Window child and accessed externally.
+/// Rc wrapper so TerminalWidget can be a Window child and accessed externally.
 struct SharedTerminal(Rc<RefCell<TerminalWidget>>);
 
 impl View for SharedTerminal {
@@ -82,9 +76,8 @@ impl OutputPanel {
         ensure_black_palette();
 
         let mut window = Window::new(bounds, title);
+        window.set_custom_palette(CP_BLACK_WINDOW.to_vec());
 
-        // Remove shadow — the output panel sits at the bottom of the screen
-        use turbo_vision::core::state::SF_SHADOW;
         let state = window.state();
         window.set_state(state & !SF_SHADOW);
 
@@ -115,15 +108,11 @@ impl View for OutputPanel {
     fn set_options(&mut self, o: u16) { self.window.set_options(o); }
     fn state(&self) -> StateFlags { self.window.state() }
     fn set_state(&mut self, s: StateFlags) { self.window.set_state(s); }
-
-    fn get_palette(&self) -> Option<Palette> {
-        // Return the black window palette — the owner chain traversal in
-        // map_color() will use this for the Frame and all children.
-        Some(Palette::from_slice(&CP_BLACK_WINDOW))
-    }
-
+    fn get_palette(&self) -> Option<Palette> { self.window.get_palette() }
     fn set_owner(&mut self, owner: *const dyn View) { self.window.set_owner(owner); }
     fn get_owner(&self) -> Option<*const dyn View> { self.window.get_owner() }
     fn get_owner_type(&self) -> OwnerType { self.window.get_owner_type() }
     fn set_owner_type(&mut self, t: OwnerType) { self.window.set_owner_type(t); }
+    fn init_after_add(&mut self) { self.window.init_after_add(); }
+    fn constrain_to_parent_bounds(&mut self) { self.window.constrain_to_parent_bounds(); }
 }
