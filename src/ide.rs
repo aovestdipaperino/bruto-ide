@@ -4,7 +4,7 @@ use crate::commands::*;
 use crate::debugger::{DebugEvent, Debugger};
 use crate::gutter::BreakpointGutter;
 use crate::ide_editor::IdeEditorWindow;
-use crate::language::{BuildResult, Language};
+use crate::language::Language;
 use crate::output_panel::OutputPanel;
 use crate::watch_window::WatchPanel;
 
@@ -104,7 +104,7 @@ pub fn run(language: Box<dyn Language>) -> turbo_vision::core::error::Result<()>
     app.desktop.add(Box::new(watch_dlg));
 
     // ── Output dialog ────────────────────────────────────
-    let output_bounds = Rect::new(0, editor_bottom - 1, w, desktop_bottom - 1);
+    let output_bounds = Rect::new(0, editor_bottom, w, desktop_bottom);
     let output_panel = OutputPanel::new(output_bounds, "Output");
     let output_term = output_panel.terminal_rc();
     output_term.borrow_mut().append_line_colored(
