@@ -5,6 +5,8 @@ edition = "2024"
 authors = ["Enzo Lombardi <enzinol@gmail.com>"]
 repository = "https://github.com/aovestdipaperino/bruto-ide"
 description = "A pluggable TUI IDE framework built with Turbo Vision for Rust"
+license = "MIT"
+readme = "README.md"
 
 [dependencies]
-turbo-vision = { git = "https://github.com/aovestdipaperino/turbo-vision-4-rust.git" }
+turbo-vision = { version = "1.0.3", git = "https://github.com/aovestdipaperino/turbo-vision-4-rust.git" }
