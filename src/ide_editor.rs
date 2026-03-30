@@ -33,6 +33,8 @@ impl View for SharedGutter {
     fn state(&self) -> StateFlags { self.0.borrow().state() }
     fn set_state(&mut self, s: StateFlags) { self.0.borrow_mut().set_state(s); }
     fn get_palette(&self) -> Option<Palette> { None }
+    fn set_owner(&mut self, o: *const dyn View) { self.0.borrow_mut().set_owner(o); }
+    fn get_owner(&self) -> Option<*const dyn View> { self.0.borrow().get_owner() }
     fn get_owner_type(&self) -> OwnerType { self.0.borrow().get_owner_type() }
     fn set_owner_type(&mut self, t: OwnerType) { self.0.borrow_mut().set_owner_type(t); }
 }
@@ -53,6 +55,8 @@ impl View for SharedEditor {
     fn set_state(&mut self, s: StateFlags) { self.0.borrow_mut().set_state(s); }
     fn update_cursor(&self, t: &mut Terminal) { self.0.borrow().update_cursor(t); }
     fn get_palette(&self) -> Option<Palette> { self.0.borrow().get_palette() }
+    fn set_owner(&mut self, o: *const dyn View) { self.0.borrow_mut().set_owner(o); }
+    fn get_owner(&self) -> Option<*const dyn View> { self.0.borrow().get_owner() }
     fn get_owner_type(&self) -> OwnerType { self.0.borrow().get_owner_type() }
     fn set_owner_type(&mut self, t: OwnerType) { self.0.borrow_mut().set_owner_type(t); }
 }
@@ -65,6 +69,8 @@ impl View for SharedScrollBar {
     fn draw(&mut self, t: &mut Terminal) { self.0.borrow_mut().draw(t); }
     fn handle_event(&mut self, e: &mut Event) { self.0.borrow_mut().handle_event(e); }
     fn get_palette(&self) -> Option<Palette> { self.0.borrow().get_palette() }
+    fn set_owner(&mut self, o: *const dyn View) { self.0.borrow_mut().set_owner(o); }
+    fn get_owner(&self) -> Option<*const dyn View> { self.0.borrow().get_owner() }
     fn get_owner_type(&self) -> OwnerType { self.0.borrow().get_owner_type() }
     fn set_owner_type(&mut self, t: OwnerType) { self.0.borrow_mut().set_owner_type(t); }
 }
@@ -77,6 +83,8 @@ impl View for SharedIndicator {
     fn draw(&mut self, t: &mut Terminal) { self.0.borrow_mut().draw(t); }
     fn handle_event(&mut self, _e: &mut Event) {}
     fn get_palette(&self) -> Option<Palette> { self.0.borrow().get_palette() }
+    fn set_owner(&mut self, o: *const dyn View) { self.0.borrow_mut().set_owner(o); }
+    fn get_owner(&self) -> Option<*const dyn View> { self.0.borrow().get_owner() }
     fn get_owner_type(&self) -> OwnerType { self.0.borrow().get_owner_type() }
     fn set_owner_type(&mut self, t: OwnerType) { self.0.borrow_mut().set_owner_type(t); }
 }
@@ -299,6 +307,10 @@ impl View for IdeEditorWindow {
 
     fn set_owner(&mut self, owner: *const dyn View) {
         self.window.set_owner(owner);
+    }
+
+    fn get_owner(&self) -> Option<*const dyn View> {
+        self.window.get_owner()
     }
 
     fn get_owner_type(&self) -> OwnerType { self.window.get_owner_type() }
