@@ -1,6 +1,6 @@
 [package]
 name = "bruto-ide"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["Enzo Lombardi <enzinol@gmail.com>"]
 repository = "https://github.com/aovestdipaperino/bruto-ide"
@@ -9,4 +9,4 @@ license = "MIT"
 readme = "README.md"
 
 [dependencies]
-turbo-vision = { version = "1.0.3", git = "https://github.com/aovestdipaperino/turbo-vision-4-rust.git" }
+turbo-vision = { version = "1.0.7", git = "https://github.com/aovestdipaperino/turbo-vision-4-rust.git" }
