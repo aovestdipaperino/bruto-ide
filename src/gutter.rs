@@ -25,6 +25,7 @@ pub struct BreakpointGutter {
     breakpoints: HashSet<usize>,
     top_line: usize,
     current_exec_line: Option<usize>,
+    owner: Option<*const dyn View>,
     owner_type: OwnerType,
 }
 
@@ -36,6 +37,7 @@ impl BreakpointGutter {
             breakpoints: HashSet::new(),
             top_line: 0,
             current_exec_line: None,
+            owner: None,
             owner_type: OwnerType::Window,
         }
     }
@@ -113,6 +115,8 @@ impl View for BreakpointGutter {
     fn state(&self) -> StateFlags { self.state }
     fn set_state(&mut self, state: StateFlags) { self.state = state; }
     fn get_palette(&self) -> Option<turbo_vision::core::palette::Palette> { None }
+    fn set_owner(&mut self, owner: *const dyn View) { self.owner = Some(owner); }
+    fn get_owner(&self) -> Option<*const dyn View> { self.owner }
     fn get_owner_type(&self) -> OwnerType { self.owner_type }
     fn set_owner_type(&mut self, owner_type: OwnerType) { self.owner_type = owner_type; }
 }

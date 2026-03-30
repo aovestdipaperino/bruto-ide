@@ -376,6 +376,8 @@ impl View for WatchView {
     fn state(&self) -> turbo_vision::core::state::StateFlags { self.0.borrow().state() }
     fn set_state(&mut self, s: turbo_vision::core::state::StateFlags) { self.0.borrow_mut().set_state(s); }
     fn get_palette(&self) -> Option<turbo_vision::core::palette::Palette> { None }
+    fn set_owner(&mut self, o: *const dyn View) { self.0.borrow_mut().set_owner(o); }
+    fn get_owner(&self) -> Option<*const dyn View> { self.0.borrow().get_owner() }
 }
 
 // ── Menu and status bar ──────────────────────────────────
