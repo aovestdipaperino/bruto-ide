@@ -11,11 +11,15 @@ use turbo_vision::core::geometry::Rect;
 use turbo_vision::core::palette::{Attr, TvColor};
 use turbo_vision::core::state::StateFlags;
 use turbo_vision::terminal::Terminal;
-use turbo_vision::views::view::{OwnerType, View};
+use turbo_vision::views::view::View;
 
 /// Width of the gutter in characters.
 pub const GUTTER_WIDTH: i16 = 1;
 
+const GUTTER_BG: Attr = Attr::new(
+    TvColor::DarkGray,
+    TvColor::Rgb { r: 0, g: 0, b: 100 }, // Dark navy — noticeably darker than editor blue (0,0,170)
+);
 const BP_ATTR: Attr = Attr::new(TvColor::LightRed, TvColor::Red);
 const EXEC_ATTR: Attr = Attr::new(TvColor::Yellow, TvColor::Blue);
 
@@ -25,8 +29,6 @@ pub struct BreakpointGutter {
     breakpoints: HashSet<usize>,
     top_line: usize,
     current_exec_line: Option<usize>,
-    owner: Option<*const dyn View>,
-    owner_type: OwnerType,
 }
 
 impl BreakpointGutter {
@@ -37,8 +39,6 @@ impl BreakpointGutter {
             breakpoints: HashSet::new(),
             top_line: 0,
             current_exec_line: None,
-            owner: None,
-            owner_type: OwnerType::Window,
         }
     }
 
@@ -71,6 +71,23 @@ impl BreakpointGutter {
     pub fn set_current_exec_line(&mut self, line: Option<usize>) {
         self.current_exec_line = line;
     }
+
+    /// Snap every breakpoint to the nearest valid line (searching forward).
+    /// Breakpoints that can't be mapped (past the last valid line) are removed.
+    pub fn snap_breakpoints(&mut self, valid: &std::collections::HashSet<usize>, max_line: usize) {
+        let old: Vec<usize> = self.breakpoints.drain().collect();
+        for bp in old {
+            if valid.contains(&bp) {
+                self.breakpoints.insert(bp);
+            } else {
+                // Search forward for next valid line
+                if let Some(snapped) = ((bp + 1)..=max_line).find(|l| valid.contains(l)) {
+                    self.breakpoints.insert(snapped);
+                }
+                // If no valid line found forward, drop the breakpoint
+            }
+        }
+    }
 }
 
 impl View for BreakpointGutter {
@@ -89,8 +106,9 @@ impl View for BreakpointGutter {
                 terminal.write_cell(x, y, Cell::new('\u{25A0}', BP_ATTR));
             } else if self.current_exec_line == Some(line_num) {
                 terminal.write_cell(x, y, Cell::new('\u{25BA}', EXEC_ATTR));
+            } else {
+                terminal.write_cell(x, y, Cell::new(' ', GUTTER_BG));
             }
-            // No else — don't paint empty cells, let the background show through
         }
     }
 
@@ -115,8 +133,4 @@ impl View for BreakpointGutter {
     fn state(&self) -> StateFlags { self.state }
     fn set_state(&mut self, state: StateFlags) { self.state = state; }
     fn get_palette(&self) -> Option<turbo_vision::core::palette::Palette> { None }
-    fn set_owner(&mut self, owner: *const dyn View) { self.owner = Some(owner); }
-    fn get_owner(&self) -> Option<*const dyn View> { self.owner }
-    fn get_owner_type(&self) -> OwnerType { self.owner_type }
-    fn set_owner_type(&mut self, owner_type: OwnerType) { self.owner_type = owner_type; }
 }

@@ -12,13 +12,14 @@ use turbo_vision::core::draw::Cell;
 use turbo_vision::core::event::{Event, EventType};
 use turbo_vision::core::geometry::{Point, Rect};
 use turbo_vision::core::palette::{Attr, Palette, TvColor};
+use turbo_vision::core::palette_chain::PaletteChainNode;
 use turbo_vision::core::state::StateFlags;
 use turbo_vision::terminal::Terminal;
 use turbo_vision::views::editor::Editor;
 use turbo_vision::views::indicator::Indicator;
 use turbo_vision::views::scrollbar::ScrollBar;
 use turbo_vision::views::syntax::SyntaxHighlighter;
-use turbo_vision::views::view::{OwnerType, View};
+use turbo_vision::views::view::View;
 use turbo_vision::views::window::Window;
 
 // ── Rc<RefCell<...>> View wrappers (same pattern as EditWindow internals) ──
@@ -33,10 +34,8 @@ impl View for SharedGutter {
     fn state(&self) -> StateFlags { self.0.borrow().state() }
     fn set_state(&mut self, s: StateFlags) { self.0.borrow_mut().set_state(s); }
     fn get_palette(&self) -> Option<Palette> { None }
-    fn set_owner(&mut self, o: *const dyn View) { self.0.borrow_mut().set_owner(o); }
-    fn get_owner(&self) -> Option<*const dyn View> { self.0.borrow().get_owner() }
-    fn get_owner_type(&self) -> OwnerType { self.0.borrow().get_owner_type() }
-    fn set_owner_type(&mut self, t: OwnerType) { self.0.borrow_mut().set_owner_type(t); }
+    fn set_palette_chain(&mut self, n: Option<PaletteChainNode>) { self.0.borrow_mut().set_palette_chain(n); }
+    fn get_palette_chain(&self) -> Option<&PaletteChainNode> { None }
 }
 
 struct SharedEditor(Rc<RefCell<Editor>>);
@@ -55,10 +54,8 @@ impl View for SharedEditor {
     fn set_state(&mut self, s: StateFlags) { self.0.borrow_mut().set_state(s); }
     fn update_cursor(&self, t: &mut Terminal) { self.0.borrow().update_cursor(t); }
     fn get_palette(&self) -> Option<Palette> { self.0.borrow().get_palette() }
-    fn set_owner(&mut self, o: *const dyn View) { self.0.borrow_mut().set_owner(o); }
-    fn get_owner(&self) -> Option<*const dyn View> { self.0.borrow().get_owner() }
-    fn get_owner_type(&self) -> OwnerType { self.0.borrow().get_owner_type() }
-    fn set_owner_type(&mut self, t: OwnerType) { self.0.borrow_mut().set_owner_type(t); }
+    fn set_palette_chain(&mut self, n: Option<PaletteChainNode>) { self.0.borrow_mut().set_palette_chain(n); }
+    fn get_palette_chain(&self) -> Option<&PaletteChainNode> { None }
 }
 
 struct SharedScrollBar(Rc<RefCell<ScrollBar>>);
@@ -69,10 +66,8 @@ impl View for SharedScrollBar {
     fn draw(&mut self, t: &mut Terminal) { self.0.borrow_mut().draw(t); }
     fn handle_event(&mut self, e: &mut Event) { self.0.borrow_mut().handle_event(e); }
     fn get_palette(&self) -> Option<Palette> { self.0.borrow().get_palette() }
-    fn set_owner(&mut self, o: *const dyn View) { self.0.borrow_mut().set_owner(o); }
-    fn get_owner(&self) -> Option<*const dyn View> { self.0.borrow().get_owner() }
-    fn get_owner_type(&self) -> OwnerType { self.0.borrow().get_owner_type() }
-    fn set_owner_type(&mut self, t: OwnerType) { self.0.borrow_mut().set_owner_type(t); }
+    fn set_palette_chain(&mut self, n: Option<PaletteChainNode>) { self.0.borrow_mut().set_palette_chain(n); }
+    fn get_palette_chain(&self) -> Option<&PaletteChainNode> { None }
 }
 
 struct SharedIndicator(Rc<RefCell<Indicator>>);
@@ -83,10 +78,8 @@ impl View for SharedIndicator {
     fn draw(&mut self, t: &mut Terminal) { self.0.borrow_mut().draw(t); }
     fn handle_event(&mut self, _e: &mut Event) {}
     fn get_palette(&self) -> Option<Palette> { self.0.borrow().get_palette() }
-    fn set_owner(&mut self, o: *const dyn View) { self.0.borrow_mut().set_owner(o); }
-    fn get_owner(&self) -> Option<*const dyn View> { self.0.borrow().get_owner() }
-    fn get_owner_type(&self) -> OwnerType { self.0.borrow().get_owner_type() }
-    fn set_owner_type(&mut self, t: OwnerType) { self.0.borrow_mut().set_owner_type(t); }
+    fn set_palette_chain(&mut self, n: Option<PaletteChainNode>) { self.0.borrow_mut().set_palette_chain(n); }
+    fn get_palette_chain(&self) -> Option<&PaletteChainNode> { None }
 }
 
 // ── IdeEditorWindow ──────────────────────────────────────
@@ -185,10 +178,10 @@ impl IdeEditorWindow {
         self.editor.borrow_mut().set_text(text);
     }
 
-    /// Sync the gutter scroll position with the editor's vertical scrollbar.
+    /// Sync the gutter scroll position with the editor's viewport offset.
     pub fn sync_gutter_scroll(&self) {
-        let scroll_y = self.v_scrollbar.borrow().get_value();
-        self.gutter.borrow_mut().set_top_line(scroll_y.max(0) as usize);
+        let delta_y = self.editor.borrow().get_delta().y;
+        self.gutter.borrow_mut().set_top_line(delta_y.max(0) as usize);
     }
 
     /// Sync frame child positions after resize.
@@ -243,7 +236,7 @@ impl View for IdeEditorWindow {
         // background green so the current statement is clearly visible.
         let exec_line = self.gutter.borrow().current_exec_line();
         if let Some(exec_line) = exec_line {
-            let scroll_y = self.v_scrollbar.borrow().get_value().max(0) as usize;
+            let scroll_y = self.editor.borrow().get_delta().y.max(0) as usize;
             // exec_line is 1-based, scroll_y is 0-based top line
             if exec_line > scroll_y {
                 let visible_row = (exec_line - scroll_y - 1) as i16;
@@ -367,14 +360,6 @@ impl View for IdeEditorWindow {
 
     fn get_palette(&self) -> Option<Palette> { self.window.get_palette() }
 
-    fn set_owner(&mut self, owner: *const dyn View) {
-        self.window.set_owner(owner);
-    }
-
-    fn get_owner(&self) -> Option<*const dyn View> {
-        self.window.get_owner()
-    }
-
-    fn get_owner_type(&self) -> OwnerType { self.window.get_owner_type() }
-    fn set_owner_type(&mut self, t: OwnerType) { self.window.set_owner_type(t); }
+    fn set_palette_chain(&mut self, n: Option<PaletteChainNode>) { self.window.set_palette_chain(n); }
+    fn get_palette_chain(&self) -> Option<&PaletteChainNode> { self.window.get_palette_chain() }
 }

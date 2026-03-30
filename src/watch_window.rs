@@ -7,7 +7,7 @@ use turbo_vision::core::geometry::Rect;
 use turbo_vision::core::palette::{Attr, TvColor};
 use turbo_vision::core::state::StateFlags;
 use turbo_vision::terminal::Terminal;
-use turbo_vision::views::view::{write_line_to_terminal, OwnerType, View};
+use turbo_vision::views::view::{write_line_to_terminal, View};
 
 // Dialog-compatible colors (gray background to match dialog chrome)
 const TEXT_ATTR: Attr = Attr::new(TvColor::Black, TvColor::LightGray);
@@ -18,8 +18,6 @@ pub struct WatchPanel {
     bounds: Rect,
     state: StateFlags,
     variables: Vec<(String, String)>,
-    owner: Option<*const dyn View>,
-    owner_type: OwnerType,
 }
 
 impl WatchPanel {
@@ -28,8 +26,6 @@ impl WatchPanel {
             bounds,
             state: 0,
             variables: Vec::new(),
-            owner: None,
-            owner_type: OwnerType::Dialog,
         }
     }
 
@@ -69,8 +65,4 @@ impl View for WatchPanel {
     fn state(&self) -> StateFlags { self.state }
     fn set_state(&mut self, state: StateFlags) { self.state = state; }
     fn get_palette(&self) -> Option<turbo_vision::core::palette::Palette> { None }
-    fn set_owner(&mut self, owner: *const dyn View) { self.owner = Some(owner); }
-    fn get_owner(&self) -> Option<*const dyn View> { self.owner }
-    fn get_owner_type(&self) -> OwnerType { self.owner_type }
-    fn set_owner_type(&mut self, owner_type: OwnerType) { self.owner_type = owner_type; }
 }

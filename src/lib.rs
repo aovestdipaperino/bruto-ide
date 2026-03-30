@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-pub mod language;
 pub mod commands;
 pub mod debugger;
 pub mod gutter;

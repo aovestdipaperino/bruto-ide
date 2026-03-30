@@ -191,6 +191,14 @@ impl Debugger {
             self.send_command("breakpoint set --name main")?;
         }
 
+        // Force lldb to process all breakpoint commands by sending a
+        // synchronous "version" query and draining the output.
+        self.send_command("version")?;
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        if let Some(ref rx) = self.lldb_rx {
+            while rx.try_recv().is_ok() {}
+        }
+
         // Run the program (output goes to capture file via compiled-in fprintf)
         self.send_command("run")?;
         self.state = DebugState::Running;
@@ -388,17 +396,106 @@ fn parse_frame_location(line: &str) -> Option<(String, usize)> {
 
 fn parse_variable_line(line: &str) -> Option<(String, String)> {
     let trimmed = line.trim();
-    if trimmed.starts_with('(') {
-        if let Some(paren_end) = trimmed.find(") ") {
-            let rest = &trimmed[paren_end + 2..];
-            if let Some(eq_pos) = rest.find(" = ") {
-                let name = rest[..eq_pos].trim().to_string();
-                let value = rest[eq_pos + 3..].trim().to_string();
-                return Some((name, value));
+    if !trimmed.starts_with('(') {
+        return None;
+    }
+    let paren_end = trimmed.find(") ")?;
+    let type_str = &trimmed[1..paren_end];
+    let rest = &trimmed[paren_end + 2..];
+    let eq_pos = rest.find(" = ")?;
+    let name = rest[..eq_pos].trim().to_string();
+    let raw_value = rest[eq_pos + 3..].trim().to_string();
+
+    // Skip internal runtime variables
+    if name == "_capture" || name == "_end_bp" || name == "_bruto_capture_fp" {
+        return None;
+    }
+
+    let value = format_variable_value(type_str, &raw_value);
+    Some((name, value))
+}
+
+/// Format a variable value for the watch window based on its lldb type.
+fn format_variable_value(type_str: &str, raw: &str) -> String {
+    // String (char *): extract quoted content
+    // lldb shows: 0x100003f80 "Hello"
+    if type_str == "char *" || type_str == "const char *" {
+        if let Some(q_start) = raw.find('"') {
+            if let Some(q_end) = raw.rfind('"') {
+                if q_end > q_start {
+                    return format!("'{}'", &raw[q_start + 1..q_end]);
+                }
             }
         }
+        // Null pointer
+        if raw.trim() == "0x0000000000000000" || raw.trim() == "0x0" || raw.contains("nil") || raw.contains("NULL") {
+            return "''".to_string();
+        }
     }
-    None
+
+    // Pointer types: show address or nil
+    if type_str.ends_with('*') && !type_str.contains("char") {
+        let addr = raw.trim();
+        if addr == "0x0000000000000000" || addr == "0x0" || addr.contains("nil") || addr.contains("NULL") {
+            return "nil".to_string();
+        }
+        return format!("^{raw}");
+    }
+
+    // Boolean (stored as i1 or bool)
+    if type_str == "bool" || type_str == "unsigned char" {
+        return match raw.as_ref() {
+            "0" | "'\\0'" | "false" => "false".to_string(),
+            "1" | "'\\x01'" | "true" => "true".to_string(),
+            _ => raw.to_string(),
+        };
+    }
+
+    // Char (i8 / signed char): show as character
+    if type_str == "char" || type_str == "signed char" {
+        // lldb may show: 65 'A' or just 65
+        if let Some(q_start) = raw.find('\'') {
+            if let Some(q_end) = raw.rfind('\'') {
+                if q_end > q_start {
+                    return raw[q_start..=q_end].to_string();
+                }
+            }
+        }
+        // Numeric — convert to char
+        if let Ok(n) = raw.trim().parse::<i64>() {
+            if (32..127).contains(&n) {
+                return format!("'{}'", n as u8 as char);
+            }
+            return format!("#{n}");
+        }
+    }
+
+    // Float (double / real)
+    if type_str == "double" {
+        // Trim trailing zeros for cleaner display
+        if let Ok(f) = raw.parse::<f64>() {
+            return format!("{:.10}", f).trim_end_matches('0').trim_end_matches('.').to_string();
+        }
+    }
+
+    // Arrays: lldb shows ([0] = 1, [1] = 4, ...) — clean up index notation
+    if type_str.contains('[') && raw.starts_with('(') {
+        let mut cleaned = raw.to_string();
+        // Remove [N] = prefixes, keep just values
+        while let Some(start) = cleaned.find('[') {
+            if let Some(end) = cleaned[start..].find("] = ") {
+                cleaned = format!("{}{}", &cleaned[..start], &cleaned[start + end + 4..]);
+            } else {
+                break;
+            }
+        }
+        return cleaned;
+    }
+
+    // Records/structs: lldb shows (field1 = val1, field2 = val2) — pass through
+    // Already readable format
+
+    raw.to_string()
 }
 
 fn parse_exit_code(line: &str) -> Option<i32> {
@@ -411,5 +508,52 @@ fn parse_exit_code(line: &str) -> Option<i32> {
         num_str.parse().ok()
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_integer_variable() {
+        let r = parse_variable_line("(long) x = 42");
+        assert_eq!(r, Some(("x".into(), "42".into())));
+    }
+
+    #[test]
+    fn parse_string_variable() {
+        let r = parse_variable_line(r#"(char *) msg = 0x0000000100000acb "Hello""#);
+        assert_eq!(r, Some(("msg".into(), "'Hello'".into())));
+    }
+
+    #[test]
+    fn parse_double_variable() {
+        let r = parse_variable_line("(double) r = 3.1400000000000001");
+        assert_eq!(r, Some(("r".into(), "3.14".into())));
+    }
+
+    #[test]
+    fn parse_pointer_variable() {
+        let r = parse_variable_line("(long *) p = 0x0000600001234000");
+        assert_eq!(r, Some(("p".into(), "^0x0000600001234000".into())));
+    }
+
+    #[test]
+    fn parse_null_pointer() {
+        let r = parse_variable_line("(long *) p = 0x0000000000000000");
+        assert_eq!(r, Some(("p".into(), "nil".into())));
+    }
+
+    #[test]
+    fn skip_internal_variable() {
+        assert_eq!(parse_variable_line("(void *) _capture = 0x0000000100000000"), None);
+        assert_eq!(parse_variable_line("(long) _end_bp = 0"), None);
+    }
+
+    #[test]
+    fn parse_non_variable_line() {
+        assert_eq!(parse_variable_line("Process 1234 stopped"), None);
+        assert_eq!(parse_variable_line("(lldb) frame variable"), None);
     }
 }
