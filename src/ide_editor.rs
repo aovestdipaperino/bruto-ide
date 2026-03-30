@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use turbo_vision::core::draw::Cell;
-use turbo_vision::core::event::Event;
+use turbo_vision::core::event::{Event, EventType};
 use turbo_vision::core::geometry::{Point, Rect};
 use turbo_vision::core::palette::{Attr, Palette, TvColor};
 use turbo_vision::core::state::StateFlags;
@@ -285,7 +285,69 @@ impl View for IdeEditorWindow {
     }
 
     fn handle_event(&mut self, event: &mut Event) {
+        // Forward mouse events to scrollbars (matching EditWindow pattern).
+        // Window::handle_event does NOT dispatch to frame_children, so without
+        // this the scrollbars would be purely decorative.
+        if event.what == EventType::MouseDown
+            || event.what == EventType::MouseMove
+            || event.what == EventType::MouseUp
+        {
+            let mut scrollbar_handled = false;
+
+            if let Some(child) = self.window.get_frame_child_mut(self.h_scrollbar_idx) {
+                child.handle_event(event);
+                if event.what == EventType::Nothing {
+                    scrollbar_handled = true;
+                }
+            }
+
+            if !scrollbar_handled {
+                if let Some(child) = self.window.get_frame_child_mut(self.v_scrollbar_idx) {
+                    child.handle_event(event);
+                    if event.what == EventType::Nothing {
+                        scrollbar_handled = true;
+                    }
+                }
+            }
+
+            if scrollbar_handled {
+                self.editor.borrow_mut().sync_from_scrollbars();
+                return;
+            }
+        }
+
+        let old_bounds = self.window.bounds();
+
         self.window.handle_event(event);
+
+        // After resize/move, recalculate gutter and editor bounds.
+        // Group::set_bounds applies the same width delta to ALL children, but the
+        // gutter must stay fixed-width — so we override both here.
+        let new_bounds = self.window.bounds();
+        if old_bounds != new_bounds {
+            let win_w = new_bounds.width();
+            let win_h = new_bounds.height();
+            let interior_w = win_w.saturating_sub(2);
+            let interior_h = win_h.saturating_sub(2);
+
+            if interior_w > 0 && interior_h > 0 {
+                let interior_a = Point::new(new_bounds.a.x + 1, new_bounds.a.y + 1);
+
+                self.gutter.borrow_mut().set_bounds(Rect::new(
+                    interior_a.x,
+                    interior_a.y,
+                    interior_a.x + GUTTER_WIDTH,
+                    interior_a.y + interior_h,
+                ));
+
+                self.editor.borrow_mut().set_bounds(Rect::new(
+                    interior_a.x + GUTTER_WIDTH,
+                    interior_a.y,
+                    interior_a.x + interior_w,
+                    interior_a.y + interior_h,
+                ));
+            }
+        }
     }
 
     fn can_focus(&self) -> bool { true }
