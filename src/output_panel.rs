@@ -18,6 +18,8 @@ use turbo_vision::views::terminal_widget::TerminalWidget;
 use turbo_vision::views::view::{OwnerType, View};
 use turbo_vision::views::window::Window;
 
+/// App palette positions for black window (1-based Borland indexing).
+/// Position 64 = app_palette_data[63] (0-based Vec index).
 const BLACK_WINDOW_PALETTE_START: usize = 64;
 
 const BLACK_WINDOW_ATTRS: [u8; 8] = [
@@ -38,11 +40,13 @@ static INIT_PALETTE: Once = Once::new();
 fn ensure_black_palette() {
     INIT_PALETTE.call_once(|| {
         let mut pal = palettes::get_app_palette();
-        while pal.len() <= BLACK_WINDOW_PALETTE_START + BLACK_WINDOW_ATTRS.len() {
+        // Palette positions are 1-based. Position N is stored at Vec index N-1.
+        let start_index = BLACK_WINDOW_PALETTE_START - 1;
+        while pal.len() < start_index + BLACK_WINDOW_ATTRS.len() {
             pal.push(0);
         }
         for (i, &attr) in BLACK_WINDOW_ATTRS.iter().enumerate() {
-            pal[BLACK_WINDOW_PALETTE_START + i] = attr;
+            pal[start_index + i] = attr;
         }
         palettes::set_custom_palette(Some(pal));
     });
