@@ -4,7 +4,7 @@ use crate::commands::*;
 use crate::debugger::{DebugEvent, Debugger};
 use crate::gutter::BreakpointGutter;
 use crate::ide_editor::IdeEditorWindow;
-use crate::language::Language;
+use bruto_lang::language::Language;
 use crate::output_panel::OutputPanel;
 use crate::watch_window::WatchPanel;
 
@@ -87,21 +87,21 @@ pub fn run(language: Box<dyn Language>) -> turbo_vision::core::error::Result<()>
     let gutter_rc = ide_win.gutter_rc();
     app.desktop.add(Box::new(ide_win));
 
-    // ── Watch dialog ─────────────────────────────────────
-    let watch_bounds = Rect::new(editor_right, desktop_top - 1, w, editor_bottom - 1);
+    // ── Watch window (resizable) ────────────────────────────
+    let watch_bounds = Rect::new(editor_right, desktop_top, w, editor_bottom);
     let watch_interior_w = watch_bounds.width() - 2;
     let watch_interior_h = watch_bounds.height() - 2;
     let watch = Rc::new(RefCell::new(WatchPanel::new(
         Rect::new(0, 0, watch_interior_w, watch_interior_h),
     )));
-    let mut watch_dlg = turbo_vision::views::dialog::Dialog::new(watch_bounds, "Watches");
-    watch_dlg.add(Box::new(WatchView(Rc::clone(&watch))));
+    let mut watch_win = turbo_vision::views::window::Window::new(watch_bounds, "Watches");
+    watch_win.add(Box::new(WatchView(Rc::clone(&watch))));
     {
         use turbo_vision::core::state::SF_SHADOW;
-        let state = watch_dlg.state();
-        watch_dlg.set_state(state & !SF_SHADOW);
+        let state = watch_win.state();
+        watch_win.set_state(state & !SF_SHADOW);
     }
-    app.desktop.add(Box::new(watch_dlg));
+    app.desktop.add(Box::new(watch_win));
 
     // ── Output dialog ────────────────────────────────────
     let output_bounds = Rect::new(0, editor_bottom, w, desktop_bottom);
@@ -127,9 +127,6 @@ pub fn run(language: Box<dyn Language>) -> turbo_vision::core::error::Result<()>
             sl.draw(&mut app.terminal);
         }
         let _ = app.terminal.flush();
-
-        watch.borrow_mut().set_variables(ide.watch_vars.clone());
-        gutter_rc.borrow_mut().set_current_exec_line(ide.exec_line);
 
         // Poll debugger
         if ide.debugger.is_running() {
@@ -171,6 +168,10 @@ pub fn run(language: Box<dyn Language>) -> turbo_vision::core::error::Result<()>
                 }
             }
         }
+
+        // Update watch and gutter AFTER polling debugger so data is current
+        watch.borrow_mut().set_variables(ide.watch_vars.clone());
+        gutter_rc.borrow_mut().set_current_exec_line(ide.exec_line);
 
         // Poll terminal events
         match app.terminal.poll_event(Duration::from_millis(30)) {
@@ -348,6 +349,12 @@ fn handle_debug_start_continue(
         return;
     };
 
+    // Snap breakpoints to valid executable lines
+    let source = editor_rc.borrow().get_text();
+    let valid = language.valid_breakpoint_lines(&source);
+    let line_count = source.lines().count();
+    gutter.borrow_mut().snap_breakpoints(&valid, line_count);
+
     let source_file = ide.source_path.clone().unwrap_or_default();
     let bp_lines = gutter.borrow().breakpoint_lines();
 
@@ -376,8 +383,6 @@ impl View for WatchView {
     fn state(&self) -> turbo_vision::core::state::StateFlags { self.0.borrow().state() }
     fn set_state(&mut self, s: turbo_vision::core::state::StateFlags) { self.0.borrow_mut().set_state(s); }
     fn get_palette(&self) -> Option<turbo_vision::core::palette::Palette> { None }
-    fn set_owner(&mut self, o: *const dyn View) { self.0.borrow_mut().set_owner(o); }
-    fn get_owner(&self) -> Option<*const dyn View> { self.0.borrow().get_owner() }
 }
 
 // ── Menu and status bar ──────────────────────────────────

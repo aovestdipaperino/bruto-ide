@@ -9,4 +9,5 @@ license = "MIT"
 readme = "README.md"
 
 [dependencies]
+bruto-lang = { version = "0.1.0", git = "https://github.com/aovestdipaperino/bruto-lang.git" }
 turbo-vision = { version = "1.0.7", git = "https://github.com/aovestdipaperino/turbo-vision-4-rust.git" }
