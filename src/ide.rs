@@ -173,6 +173,17 @@ pub fn run(language: Box<dyn Language>) -> turbo_vision::core::error::Result<()>
         watch.borrow_mut().set_variables(ide.watch_vars.clone());
         gutter_rc.borrow_mut().set_current_exec_line(ide.exec_line);
 
+        // Auto-scroll editor to keep current execution line visible
+        if let Some(exec_line) = ide.exec_line {
+            let editor = editor_rc.borrow();
+            let delta_y = editor.get_delta().y.max(0) as usize;
+            let visible_h = editor.bounds().height_clamped() as usize;
+            drop(editor);
+            if exec_line <= delta_y || exec_line > delta_y + visible_h {
+                editor_rc.borrow_mut().scroll_to_line(exec_line - 1);
+            }
+        }
+
         // Poll terminal events
         match app.terminal.poll_event(Duration::from_millis(30)) {
             Ok(Some(mut event)) => {

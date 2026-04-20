@@ -332,6 +332,7 @@ impl Debugger {
                         line: loc.1,
                     });
                     needs_var_request = true;
+                    self.pending_var_request = true;
                     already_stopped = true;
                 }
             }
