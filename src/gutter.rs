@@ -60,6 +60,10 @@ impl BreakpointGutter {
         self.breakpoints.iter().copied().collect()
     }
 
+    pub fn clear_breakpoints(&mut self) {
+        self.breakpoints.clear();
+    }
+
     pub fn set_top_line(&mut self, line: usize) {
         self.top_line = line;
     }

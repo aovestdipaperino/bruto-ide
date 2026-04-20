@@ -13,12 +13,14 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use turbo_vision::app::Application;
-use turbo_vision::core::command::{CM_NEW, CM_OPEN, CM_QUIT, CM_SAVE, CM_SAVE_AS};
+use turbo_vision::core::command::{CM_CLOSE, CM_NEW, CM_OPEN, CM_QUIT, CM_SAVE, CM_SAVE_AS, CM_YES, CM_NO};
 use turbo_vision::core::event::{Event, EventType, KB_F2, KB_F3, KB_F5, KB_F7, KB_F8, KB_F9};
 use turbo_vision::core::geometry::Rect;
 use turbo_vision::core::menu_data::{Menu, MenuItem};
 use turbo_vision::core::palette::{Attr, TvColor};
+use turbo_vision::views::file_dialog::FileDialog;
 use turbo_vision::views::menu_bar::{MenuBar, SubMenu};
+use turbo_vision::views::msgbox::{message_box, MF_YES_BUTTON, MF_NO_BUTTON, MF_CANCEL_BUTTON};
 use turbo_vision::views::status_line::{StatusItem, StatusLine};
 use turbo_vision::views::terminal_widget::TerminalWidget;
 use turbo_vision::views::View;
@@ -30,6 +32,8 @@ struct IdeState {
     exe_path: Option<String>,
     console_capture_path: Option<String>,
     exec_line: Option<usize>,
+    /// Path of the currently open file (None = untitled)
+    file_path: Option<String>,
 }
 
 impl IdeState {
@@ -41,6 +45,7 @@ impl IdeState {
             exe_path: None,
             console_capture_path: None,
             exec_line: None,
+            file_path: None,
         }
     }
 }
@@ -82,7 +87,6 @@ pub fn run(language: Box<dyn Language>) -> turbo_vision::core::error::Result<()>
     let editor_bounds = Rect::new(0, desktop_top, editor_right, editor_bottom);
     let ide_win = IdeEditorWindow::new(editor_bounds, &title);
     ide_win.set_highlighter(language.create_highlighter());
-    ide_win.set_text(language.sample_program());
     let editor_rc = ide_win.editor_rc();
     let gutter_rc = ide_win.gutter_rc();
     app.desktop.add(Box::new(ide_win));
@@ -107,10 +111,6 @@ pub fn run(language: Box<dyn Language>) -> turbo_vision::core::error::Result<()>
     let output_bounds = Rect::new(0, editor_bottom, w, desktop_bottom);
     let output_panel = OutputPanel::new(output_bounds, "Output");
     let output_term = output_panel.terminal_rc();
-    output_term.borrow_mut().append_line_colored(
-        format!("Bruto IDE ready ({}).  Press F9 to build.", language.name()),
-        OUTPUT_TEXT,
-    );
     app.desktop.add(Box::new(output_panel));
 
     let mut ide = IdeState::new();
@@ -253,7 +253,56 @@ fn handle_command(
     ide: &mut IdeState,
 ) -> bool {
     match cmd {
-        CM_QUIT => { ide.debugger.stop(); app.running = false; true }
+        CM_QUIT | CM_CLOSE => {
+            if !check_save_before_close(app, editor_rc, ide) {
+                return true; // user cancelled
+            }
+            ide.debugger.stop();
+            app.running = false;
+            true
+        }
+        CM_NEW => {
+            if !check_save_before_close(app, editor_rc, ide) {
+                return true;
+            }
+            editor_rc.borrow_mut().set_text("");
+            editor_rc.borrow_mut().clear_modified();
+            ide.file_path = None;
+            gutter.borrow_mut().clear_breakpoints();
+            true
+        }
+        CM_OPEN => {
+            if !check_save_before_close(app, editor_rc, ide) {
+                return true;
+            }
+            let (tw, th) = app.terminal.size();
+            let dw = 64i16.min(tw as i16 - 4);
+            let dh = 18i16.min(th as i16 - 4);
+            let x = ((tw as i16) - dw) / 2;
+            let y = ((th as i16) - dh) / 2;
+            let bounds = Rect::new(x, y, x + dw, y + dh);
+            let ext = language.file_extension();
+            let wildcard = format!("*.{ext}");
+            let mut dialog = FileDialog::new(bounds, "Open File", &wildcard, None);
+            if let Some(path) = dialog.execute(app) {
+                if let Err(e) = editor_rc.borrow_mut().load_file(&path) {
+                    use turbo_vision::views::msgbox::message_box_error;
+                    message_box_error(app, &format!("Cannot open file:\n{e}"));
+                } else {
+                    ide.file_path = Some(path.to_string_lossy().to_string());
+                    gutter.borrow_mut().clear_breakpoints();
+                }
+            }
+            true
+        }
+        CM_SAVE => {
+            handle_save(app, language, editor_rc, ide);
+            true
+        }
+        CM_SAVE_AS => {
+            handle_save_as(app, language, editor_rc, ide);
+            true
+        }
         CM_BUILD => { handle_build(language, editor_rc, &mut output_rc.borrow_mut(), ide); true }
         CM_RUN => {
             handle_build(language, editor_rc, &mut output_rc.borrow_mut(), ide);
@@ -282,6 +331,100 @@ fn handle_command(
             true
         }
         _ => false,
+    }
+}
+
+/// Returns true if it's OK to proceed (saved or discarded), false if cancelled.
+fn check_save_before_close(
+    app: &mut Application,
+    editor_rc: &Rc<RefCell<turbo_vision::views::editor::Editor>>,
+    ide: &mut IdeState,
+) -> bool {
+    if !editor_rc.borrow().is_modified() {
+        return true;
+    }
+    let name = ide.file_path.as_deref().unwrap_or("Untitled");
+    let result = message_box(
+        app,
+        &format!("{name} has been modified.\n\nSave changes?"),
+        MF_YES_BUTTON | MF_NO_BUTTON | MF_CANCEL_BUTTON,
+    );
+    match result {
+        CM_YES => {
+            // Save, then proceed
+            handle_save_from_check(app, editor_rc, ide);
+            true
+        }
+        CM_NO => true,   // discard
+        _ => false,       // cancel
+    }
+}
+
+fn handle_save(
+    app: &mut Application,
+    language: &Box<dyn Language>,
+    editor_rc: &Rc<RefCell<turbo_vision::views::editor::Editor>>,
+    ide: &mut IdeState,
+) {
+    if ide.file_path.is_some() {
+        if let Err(e) = editor_rc.borrow_mut().save_file() {
+            use turbo_vision::views::msgbox::message_box_error;
+            message_box_error(app, &format!("Save failed:\n{e}"));
+        }
+    } else {
+        handle_save_as(app, language, editor_rc, ide);
+    }
+}
+
+fn handle_save_as(
+    app: &mut Application,
+    language: &Box<dyn Language>,
+    editor_rc: &Rc<RefCell<turbo_vision::views::editor::Editor>>,
+    ide: &mut IdeState,
+) {
+    let (tw, th) = app.terminal.size();
+    let dw = 64i16.min(tw as i16 - 4);
+    let dh = 18i16.min(th as i16 - 4);
+    let x = ((tw as i16) - dw) / 2;
+    let y = ((th as i16) - dh) / 2;
+    let bounds = Rect::new(x, y, x + dw, y + dh);
+    let ext = language.file_extension();
+    let wildcard = format!("*.{ext}");
+    let mut dialog = FileDialog::new(bounds, "Save As", &wildcard, None);
+    if let Some(path) = dialog.execute(app) {
+        let path_str = path.to_string_lossy().to_string();
+        if let Err(e) = editor_rc.borrow_mut().save_as(&path_str) {
+            use turbo_vision::views::msgbox::message_box_error;
+            message_box_error(app, &format!("Save failed:\n{e}"));
+        } else {
+            ide.file_path = Some(path_str);
+        }
+    }
+}
+
+/// Save helper used by check_save_before_close (no language ref needed).
+fn handle_save_from_check(
+    app: &mut Application,
+    editor_rc: &Rc<RefCell<turbo_vision::views::editor::Editor>>,
+    ide: &mut IdeState,
+) {
+    if ide.file_path.is_some() {
+        if let Err(e) = editor_rc.borrow_mut().save_file() {
+            use turbo_vision::views::msgbox::message_box_error;
+            message_box_error(app, &format!("Save failed:\n{e}"));
+        }
+    } else {
+        // No file path — need Save As, but we don't have language ref here.
+        // Use input_box as a simple fallback for the filename.
+        use turbo_vision::views::msgbox::input_box;
+        if let Some(path) = input_box(app, "Save As", "File name:", "untitled.pas", 256) {
+            if let Err(e) = editor_rc.borrow_mut().save_as(&path) {
+                use turbo_vision::views::msgbox::message_box_error;
+                message_box_error(app, &format!("Save failed:\n{e}"));
+            } else {
+                ide.file_path = Some(path);
+            }
+        }
     }
 }
 
