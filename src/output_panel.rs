@@ -167,4 +167,6 @@ impl View for OutputPanel {
     fn get_palette_chain(&self) -> Option<&PaletteChainNode> { self.window.get_palette_chain() }
     fn init_after_add(&mut self) { self.window.init_after_add(); }
     fn constrain_to_parent_bounds(&mut self) { self.window.constrain_to_parent_bounds(); }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }

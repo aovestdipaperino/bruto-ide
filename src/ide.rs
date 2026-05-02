@@ -1,24 +1,33 @@
 /// IDE runner — takes a Language implementation and runs the TUI.
+///
+/// The desktop hosts at most one persistent watch panel + one output panel,
+/// plus zero or more editor windows. Editor windows are created on
+/// File→New / File→Open and removed when the user clicks the close button.
+/// All file operations route through the [`FileEditor`] trait on the
+/// focused editor, looked up dynamically via [`focused_editor`].
 
 use crate::commands::*;
 use crate::debugger::{DebugEvent, Debugger};
-use crate::gutter::BreakpointGutter;
-use crate::ide_editor::IdeEditorWindow;
+use crate::ide_editor::{IdeEditorWindow, SharedIdeEditorWindow};
+use crate::ide_file_editor::IdeFileEditor;
 use bruto_lang::language::Language;
 use crate::output_panel::OutputPanel;
 use crate::watch_window::WatchPanel;
 
 use std::cell::RefCell;
+use std::path::Path;
 use std::rc::Rc;
 use std::time::Duration;
 
 use turbo_vision::app::Application;
-use turbo_vision::core::command::{CM_CLOSE, CM_NEW, CM_OPEN, CM_QUIT, CM_SAVE, CM_SAVE_AS, CM_YES, CM_NO};
+use turbo_vision::core::command::{CM_CLOSE, CM_NEW, CM_NO, CM_OPEN, CM_QUIT, CM_SAVE, CM_SAVE_AS, CM_YES};
+use turbo_vision::core::state::SF_CLOSED;
 use turbo_vision::core::event::{Event, EventType, KB_F2, KB_F3, KB_F5, KB_F7, KB_F8, KB_F9};
 use turbo_vision::core::geometry::Rect;
 use turbo_vision::core::menu_data::{Menu, MenuItem};
 use turbo_vision::core::palette::{Attr, TvColor};
-use turbo_vision::views::file_dialog::FileDialog;
+use turbo_vision::views::editor_traits::{ExternalState, FileEditor};
+use turbo_vision::views::file_dialog::FileDialogBuilder;
 use turbo_vision::views::menu_bar::{MenuBar, SubMenu};
 use turbo_vision::views::msgbox::{message_box, MF_YES_BUTTON, MF_NO_BUTTON, MF_CANCEL_BUTTON};
 use turbo_vision::views::status_line::{StatusItem, StatusLine};
@@ -32,22 +41,13 @@ struct IdeState {
     exe_path: Option<String>,
     console_capture_path: Option<String>,
     exec_line: Option<usize>,
-    /// Path of the currently open file (None = untitled)
-    file_path: Option<String>,
-}
-
-impl IdeState {
-    fn new() -> Self {
-        Self {
-            debugger: Debugger::new(),
-            watch_vars: Vec::new(),
-            source_path: None,
-            exe_path: None,
-            console_capture_path: None,
-            exec_line: None,
-            file_path: None,
-        }
-    }
+    /// Layout for each new editor window (full editor area). All editors
+    /// stack on top of each other at this rect; the user can drag/resize.
+    editor_bounds: Rect,
+    /// Default save-as wildcard, e.g. `"*.pas"`.
+    save_wildcard: String,
+    /// Default title for an Untitled buffer, e.g. `"Untitled.pas"`.
+    untitled_title: String,
 }
 
 const OUTPUT_TEXT: Attr = Attr::new(TvColor::LightGray, TvColor::Black);
@@ -82,16 +82,11 @@ pub fn run(language: Box<dyn Language>) -> turbo_vision::core::error::Result<()>
     let editor_right = w - watch_width;
     let editor_bottom = desktop_bottom - output_height;
 
-    // ── Editor window ────────────────────────────────────
-    let title = format!("Untitled.{}", language.file_extension());
     let editor_bounds = Rect::new(0, desktop_top, editor_right, editor_bottom);
-    let ide_win = IdeEditorWindow::new(editor_bounds, &title);
-    ide_win.set_highlighter(language.create_highlighter());
-    let editor_rc = ide_win.editor_rc();
-    let gutter_rc = ide_win.gutter_rc();
-    app.desktop.add(Box::new(ide_win));
+    let save_wildcard = format!("*.{}", language.file_extension());
+    let untitled_title = format!("Untitled.{}", language.file_extension());
 
-    // ── Watch window (resizable) ────────────────────────────
+    // ── Watch window ────────────────────────────────────────
     let watch_bounds = Rect::new(editor_right, desktop_top, w, editor_bottom);
     let watch_interior_w = watch_bounds.width() - 2;
     let watch_interior_h = watch_bounds.height() - 2;
@@ -107,13 +102,23 @@ pub fn run(language: Box<dyn Language>) -> turbo_vision::core::error::Result<()>
     }
     app.desktop.add(Box::new(watch_win));
 
-    // ── Output dialog ────────────────────────────────────
+    // ── Output panel ───────────────────────────────────────
     let output_bounds = Rect::new(0, editor_bottom, w, desktop_bottom);
     let output_panel = OutputPanel::new(output_bounds, "Output");
     let output_term = output_panel.terminal_rc();
     app.desktop.add(Box::new(output_panel));
 
-    let mut ide = IdeState::new();
+    let mut ide = IdeState {
+        debugger: Debugger::new(),
+        watch_vars: Vec::new(),
+        source_path: None,
+        exe_path: None,
+        console_capture_path: None,
+        exec_line: None,
+        editor_bounds,
+        save_wildcard,
+        untitled_title,
+    };
 
     // ── Event loop ───────────────────────────────────────
     app.running = true;
@@ -169,20 +174,25 @@ pub fn run(language: Box<dyn Language>) -> turbo_vision::core::error::Result<()>
             }
         }
 
-        // Update watch and gutter AFTER polling debugger so data is current
+        // Update watch and per-editor exec-line state
         watch.borrow_mut().set_variables(ide.watch_vars.clone());
-        gutter_rc.borrow_mut().set_current_exec_line(ide.exec_line);
+        if let Some(ed) = focused_editor(&mut app) {
+            ed.borrow_mut().set_current_exec_line(ide.exec_line);
 
-        // Auto-scroll editor to keep current execution line visible
-        if let Some(exec_line) = ide.exec_line {
-            let editor = editor_rc.borrow();
-            let delta_y = editor.get_delta().y.max(0) as usize;
-            let visible_h = editor.bounds().height_clamped() as usize;
-            drop(editor);
-            if exec_line <= delta_y || exec_line > delta_y + visible_h {
-                editor_rc.borrow_mut().scroll_to_line(exec_line - 1);
+            if let Some(exec_line) = ide.exec_line {
+                let editor_inner = ed.borrow().editor_rc();
+                let editor = editor_inner.borrow();
+                let delta_y = editor.get_delta().y.max(0) as usize;
+                let visible_h = editor.bounds().height_clamped() as usize;
+                drop(editor);
+                if exec_line <= delta_y || exec_line > delta_y + visible_h {
+                    editor_inner.borrow_mut().scroll_to_line(exec_line - 1);
+                }
             }
         }
+
+        // External-change polling: refresh clean buffers silently, prompt for dirty ones.
+        poll_all_external_changes(&mut app);
 
         // Poll terminal events
         match app.terminal.poll_event(Duration::from_millis(30)) {
@@ -204,16 +214,12 @@ pub fn run(language: Box<dyn Language>) -> turbo_vision::core::error::Result<()>
 
                 if event.what == EventType::Keyboard {
                     match event.key_code {
-                        KB_F9 => {
-                            handle_build(&language, &editor_rc, &mut output_term.borrow_mut(), &mut ide);
-                            event.clear();
-                        }
-                        KB_F5 => {
-                            handle_debug_start_continue(
-                                &language, &editor_rc, &gutter_rc, &mut output_term.borrow_mut(), &mut ide,
-                            );
-                            event.clear();
-                        }
+                        // Menu items declare these as shortcuts but the menu bar only
+                        // displays the labels; dispatch the commands ourselves.
+                        KB_F2 => { event = Event::command(CM_SAVE); }
+                        KB_F3 => { event = Event::command(CM_OPEN); }
+                        KB_F9 => { event = Event::command(CM_BUILD); }
+                        KB_F5 => { event = Event::command(CM_DEBUG_START); }
                         KB_F7 => {
                             if ide.debugger.is_running() { let _ = ide.debugger.step_into(); }
                             event.clear();
@@ -228,12 +234,21 @@ pub fn run(language: Box<dyn Language>) -> turbo_vision::core::error::Result<()>
 
                 if event.what == EventType::Command {
                     let handled = handle_command(
-                        event.command, &mut app, &language, &editor_rc, &gutter_rc, &output_term, &mut ide,
+                        event.command, &mut app, &language, &output_term, &mut ide,
                     );
                     if handled { event.clear(); }
                 }
 
                 app.desktop.handle_event(&mut event);
+
+                // Frame-generated commands (e.g. CM_CLOSE from a close-button click)
+                // are produced during desktop dispatch, so re-run handle_command afterwards.
+                if event.what == EventType::Command {
+                    let handled = handle_command(
+                        event.command, &mut app, &language, &output_term, &mut ide,
+                    );
+                    if handled { event.clear(); }
+                }
             }
             Ok(None) => {}
             Err(_) => {}
@@ -247,76 +262,66 @@ fn handle_command(
     cmd: u16,
     app: &mut Application,
     language: &Box<dyn Language>,
-    editor_rc: &Rc<RefCell<turbo_vision::views::editor::Editor>>,
-    gutter: &Rc<RefCell<BreakpointGutter>>,
     output_rc: &Rc<RefCell<TerminalWidget>>,
     ide: &mut IdeState,
 ) -> bool {
     match cmd {
-        CM_QUIT | CM_CLOSE => {
-            if !check_save_before_close(app, editor_rc, ide) {
-                return true; // user cancelled
+        CM_QUIT => {
+            // Walk all editors and prompt for unsaved changes; any cancel aborts quit.
+            if !confirm_close_all_dirty_editors(app) {
+                return true;
             }
             ide.debugger.stop();
             app.running = false;
             true
         }
-        CM_NEW => {
-            if !check_save_before_close(app, editor_rc, ide) {
+        CM_CLOSE_EDITOR => {
+            if !confirm_close_focused_editor(app) {
                 return true;
             }
-            editor_rc.borrow_mut().set_text("");
-            editor_rc.borrow_mut().clear_modified();
-            ide.file_path = None;
-            gutter.borrow_mut().clear_breakpoints();
+            close_focused_window(app);
+            true
+        }
+        CM_CLOSE => {
+            // Watch / Output close button: close that window without prompting.
+            close_focused_window(app);
+            true
+        }
+        CM_NEW => {
+            new_editor_window(app, language, ide);
             true
         }
         CM_OPEN => {
-            if !check_save_before_close(app, editor_rc, ide) {
-                return true;
-            }
-            let (tw, th) = app.terminal.size();
-            let dw = 64i16.min(tw as i16 - 4);
-            let dh = 18i16.min(th as i16 - 4);
-            let x = ((tw as i16) - dw) / 2;
-            let y = ((th as i16) - dh) / 2;
-            let bounds = Rect::new(x, y, x + dw, y + dh);
-            let ext = language.file_extension();
-            let wildcard = format!("*.{ext}");
-            let mut dialog = FileDialog::new(bounds, "Open File", &wildcard, None);
-            if let Some(path) = dialog.execute(app) {
-                if let Err(e) = editor_rc.borrow_mut().load_file(&path) {
-                    use turbo_vision::views::msgbox::message_box_error;
-                    message_box_error(app, &format!("Cannot open file:\n{e}"));
-                } else {
-                    ide.file_path = Some(path.to_string_lossy().to_string());
-                    gutter.borrow_mut().clear_breakpoints();
-                }
-            }
+            handle_open(app, language, ide);
             true
         }
         CM_SAVE => {
-            handle_save(app, language, editor_rc, ide);
+            handle_save(app, ide);
             true
         }
         CM_SAVE_AS => {
-            handle_save_as(app, language, editor_rc, ide);
+            handle_save_as(app, ide);
             true
         }
-        CM_BUILD => { handle_build(language, editor_rc, &mut output_rc.borrow_mut(), ide); true }
+        CM_BUILD => {
+            handle_build(app, language, &mut output_rc.borrow_mut(), ide);
+            true
+        }
         CM_RUN => {
-            handle_build(language, editor_rc, &mut output_rc.borrow_mut(), ide);
+            handle_build(app, language, &mut output_rc.borrow_mut(), ide);
             if let Some(exe) = ide.exe_path.clone() {
                 handle_run(&exe, &ide.console_capture_path, &mut output_rc.borrow_mut());
             }
             true
         }
         CM_DEBUG_START | CM_DEBUG_CONTINUE => {
-            handle_debug_start_continue(language, editor_rc, gutter, &mut output_rc.borrow_mut(), ide);
+            handle_debug_start_continue(app, language, &mut output_rc.borrow_mut(), ide);
             true
         }
         CM_DEBUG_STOP => {
-            ide.debugger.stop(); ide.exec_line = None; ide.watch_vars.clear();
+            ide.debugger.stop();
+            ide.exec_line = None;
+            ide.watch_vars.clear();
             append_output_line(&mut output_rc.borrow_mut(), "Debugger stopped.", Some(CONSOLE_INFO));
             true
         }
@@ -334,107 +339,120 @@ fn handle_command(
     }
 }
 
-/// Returns true if it's OK to proceed (saved or discarded), false if cancelled.
-fn check_save_before_close(
-    app: &mut Application,
-    editor_rc: &Rc<RefCell<turbo_vision::views::editor::Editor>>,
-    ide: &mut IdeState,
-) -> bool {
-    if !editor_rc.borrow().is_modified() {
-        return true;
-    }
-    let name = ide.file_path.as_deref().unwrap_or("Untitled");
-    let result = message_box(
-        app,
-        &format!("{name} has been modified.\n\nSave changes?"),
-        MF_YES_BUTTON | MF_NO_BUTTON | MF_CANCEL_BUTTON,
-    );
-    match result {
-        CM_YES => {
-            // Save, then proceed
-            handle_save_from_check(app, editor_rc, ide);
-            true
+// ── Editor lifecycle ─────────────────────────────────────
+
+/// Build a fresh `IdeEditorWindow` wired up with the language's highlighter.
+fn make_editor(language: &Box<dyn Language>, ide: &IdeState) -> Rc<RefCell<IdeEditorWindow>> {
+    let mut ide_win = IdeEditorWindow::new(ide.editor_bounds, &ide.untitled_title, &ide.save_wildcard);
+    ide_win.set_highlighter(language.create_highlighter());
+    Rc::new(RefCell::new(ide_win))
+}
+
+/// Add an editor wrapper to the desktop and give it focus.
+fn install_editor(app: &mut Application, editor: Rc<RefCell<IdeEditorWindow>>) {
+    let wrapper = SharedIdeEditorWindow(editor);
+    app.desktop.add(Box::new(wrapper));
+    // The newly added child is at the end; focus it via desktop's last index.
+    let last = app.desktop.child_count().saturating_sub(1);
+    if last < app.desktop.child_count() {
+        // Clear focus on others, then mark new one as focused so handle_event routes there.
+        for i in 0..app.desktop.child_count() {
+            app.desktop.child_at_mut(i).set_focus(i == last);
         }
-        CM_NO => true,   // discard
-        _ => false,       // cancel
     }
 }
 
-fn handle_save(
-    app: &mut Application,
-    language: &Box<dyn Language>,
-    editor_rc: &Rc<RefCell<turbo_vision::views::editor::Editor>>,
-    ide: &mut IdeState,
-) {
-    if ide.file_path.is_some() {
-        if let Err(e) = editor_rc.borrow_mut().save_file() {
+fn new_editor_window(app: &mut Application, language: &Box<dyn Language>, ide: &IdeState) {
+    let editor = make_editor(language, ide);
+    install_editor(app, editor);
+}
+
+fn handle_open(app: &mut Application, language: &Box<dyn Language>, ide: &IdeState) {
+    let bounds = centered_dialog_bounds(app);
+    let mut dialog = FileDialogBuilder::new()
+        .bounds(bounds)
+        .title("Open File")
+        .wildcard(ide.save_wildcard.clone())
+        .button_label("~O~pen")
+        .build();
+    let Some(path) = dialog.execute(app) else { return };
+
+    // Already open? Focus that window instead of creating a duplicate.
+    if let Some(idx) = find_editor_with_path(app, &path) {
+        for i in 0..app.desktop.child_count() {
+            app.desktop.child_at_mut(i).set_focus(i == idx);
+        }
+        return;
+    }
+
+    let editor = make_editor(language, ide);
+    if let Err(e) = editor.borrow_mut().load(path.clone()) {
+        use turbo_vision::views::msgbox::message_box_error;
+        message_box_error(app, &format!("Cannot open file:\n{e}"));
+        return;
+    }
+    install_editor(app, editor);
+}
+
+fn handle_save(app: &mut Application, ide: &IdeState) {
+    let Some(editor) = focused_editor(app) else { return };
+    let has_path = editor.borrow().file_path().is_some();
+    if has_path {
+        if let Err(e) = editor.borrow_mut().save() {
             use turbo_vision::views::msgbox::message_box_error;
             message_box_error(app, &format!("Save failed:\n{e}"));
         }
     } else {
-        handle_save_as(app, language, editor_rc, ide);
+        save_focused_as(app, &editor, ide);
     }
 }
 
-fn handle_save_as(
-    app: &mut Application,
-    language: &Box<dyn Language>,
-    editor_rc: &Rc<RefCell<turbo_vision::views::editor::Editor>>,
-    ide: &mut IdeState,
-) {
-    let (tw, th) = app.terminal.size();
-    let dw = 64i16.min(tw as i16 - 4);
-    let dh = 18i16.min(th as i16 - 4);
-    let x = ((tw as i16) - dw) / 2;
-    let y = ((th as i16) - dh) / 2;
-    let bounds = Rect::new(x, y, x + dw, y + dh);
-    let ext = language.file_extension();
-    let wildcard = format!("*.{ext}");
-    let mut dialog = FileDialog::new(bounds, "Save As", &wildcard, None);
-    if let Some(path) = dialog.execute(app) {
-        let path_str = path.to_string_lossy().to_string();
-        if let Err(e) = editor_rc.borrow_mut().save_as(&path_str) {
-            use turbo_vision::views::msgbox::message_box_error;
-            message_box_error(app, &format!("Save failed:\n{e}"));
-        } else {
-            ide.file_path = Some(path_str);
+fn handle_save_as(app: &mut Application, ide: &IdeState) {
+    let Some(editor) = focused_editor(app) else { return };
+    save_focused_as(app, &editor, ide);
+}
+
+fn save_focused_as(app: &mut Application, editor: &Rc<RefCell<IdeEditorWindow>>, ide: &IdeState) {
+    let bounds = centered_dialog_bounds(app);
+    let mut dialog = FileDialogBuilder::new()
+        .bounds(bounds)
+        .title("Save As")
+        .wildcard(ide.save_wildcard.clone())
+        .button_label("~S~ave")
+        .build();
+    let Some(path) = dialog.execute(app) else { return };
+
+    if path.exists() {
+        use turbo_vision::views::msgbox::confirmation_box_yes_no;
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+        let answer = confirmation_box_yes_no(
+            app,
+            &format!("{name} already exists.\n\nOverwrite?"),
+        );
+        if answer != CM_YES {
+            return;
         }
+    }
+
+    if let Err(e) = editor.borrow_mut().save_as(path) {
+        use turbo_vision::views::msgbox::message_box_error;
+        message_box_error(app, &format!("Save failed:\n{e}"));
     }
 }
 
-/// Save helper used by check_save_before_close (no language ref needed).
-fn handle_save_from_check(
-    app: &mut Application,
-    editor_rc: &Rc<RefCell<turbo_vision::views::editor::Editor>>,
-    ide: &mut IdeState,
-) {
-    if ide.file_path.is_some() {
-        if let Err(e) = editor_rc.borrow_mut().save_file() {
-            use turbo_vision::views::msgbox::message_box_error;
-            message_box_error(app, &format!("Save failed:\n{e}"));
-        }
-    } else {
-        // No file path — need Save As, but we don't have language ref here.
-        // Use input_box as a simple fallback for the filename.
-        use turbo_vision::views::msgbox::input_box;
-        if let Some(path) = input_box(app, "Save As", "File name:", "untitled.pas", 256) {
-            if let Err(e) = editor_rc.borrow_mut().save_as(&path) {
-                use turbo_vision::views::msgbox::message_box_error;
-                message_box_error(app, &format!("Save failed:\n{e}"));
-            } else {
-                ide.file_path = Some(path);
-            }
-        }
-    }
-}
+// ── Build / Run / Debug ──────────────────────────────────
 
 fn handle_build(
+    app: &mut Application,
     language: &Box<dyn Language>,
-    editor_rc: &Rc<RefCell<turbo_vision::views::editor::Editor>>,
     output: &mut TerminalWidget,
     ide: &mut IdeState,
 ) {
-    let source = editor_rc.borrow().get_text();
+    let Some(editor) = focused_editor(app) else {
+        append_output_line(output, "No active editor — open or create a file first.", Some(CONSOLE_INFO));
+        return;
+    };
+    let source = editor.borrow().editor_rc().borrow().get_text();
     output.clear();
     append_output_line(output, "Building...", Some(CONSOLE_INFO));
 
@@ -485,9 +503,8 @@ fn handle_run(exe_path: &str, console_capture_path: &Option<String>, output: &mu
 }
 
 fn handle_debug_start_continue(
+    app: &mut Application,
     language: &Box<dyn Language>,
-    editor_rc: &Rc<RefCell<turbo_vision::views::editor::Editor>>,
-    gutter: &Rc<RefCell<BreakpointGutter>>,
     output: &mut TerminalWidget,
     ide: &mut IdeState,
 ) {
@@ -497,20 +514,25 @@ fn handle_debug_start_continue(
         return;
     }
 
-    handle_build(language, editor_rc, output, ide);
+    handle_build(app, language, output, ide);
     let Some(exe_path) = ide.exe_path.clone() else {
         append_output_line(output, "No executable to debug.", Some(ERROR));
         return;
     };
 
+    let Some(editor) = focused_editor(app) else {
+        append_output_line(output, "No active editor.", Some(ERROR));
+        return;
+    };
+
     // Snap breakpoints to valid executable lines
-    let source = editor_rc.borrow().get_text();
-    let valid = language.valid_breakpoint_lines(&source);
+    let source = editor.borrow().editor_rc().borrow().get_text();
+    let valid: Vec<usize> = language.valid_breakpoint_lines(&source).into_iter().collect();
     let line_count = source.lines().count();
-    gutter.borrow_mut().snap_breakpoints(&valid, line_count);
+    editor.borrow_mut().snap_breakpoints(&valid, line_count);
 
     let source_file = ide.source_path.clone().unwrap_or_default();
-    let bp_lines = gutter.borrow().breakpoint_lines();
+    let bp_lines = editor.borrow().breakpoint_lines();
 
     append_output_line(
         output,
@@ -523,6 +545,190 @@ fn handle_debug_start_continue(
         Ok(()) => append_output_line(output, "Debugger started.", Some(SUCCESS)),
         Err(e) => append_output_line(output, &format!("Debugger error: {}", e), Some(ERROR)),
     }
+}
+
+// ── Window/desktop navigation ────────────────────────────
+
+/// Find the first child of the desktop that is both a `SharedIdeEditorWindow`
+/// wrapper and currently focused, and return its underlying `Rc`.
+fn focused_editor(app: &mut Application) -> Option<Rc<RefCell<IdeEditorWindow>>> {
+    for i in 0..app.desktop.child_count() {
+        let child = app.desktop.child_at(i);
+        if !child.is_focused() {
+            continue;
+        }
+        if let Some(shared) = child.as_any().downcast_ref::<SharedIdeEditorWindow>() {
+            return Some(Rc::clone(&shared.0));
+        }
+    }
+    None
+}
+
+/// Return the desktop child index of an editor showing `path`, comparing
+/// canonicalized paths so symlinks and relative segments don't cause misses.
+fn find_editor_with_path(app: &mut Application, path: &Path) -> Option<usize> {
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    for i in 0..app.desktop.child_count() {
+        let Some(shared) = app.desktop.child_at(i).as_any().downcast_ref::<SharedIdeEditorWindow>() else {
+            continue;
+        };
+        let Some(existing) = shared.0.borrow().file_path() else { continue };
+        let canonical = std::fs::canonicalize(&existing).unwrap_or(existing);
+        if canonical == target {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Run [`FileEditor::poll_external_changes`] on every editor on the desktop.
+/// - `Modified` + clean buffer: silent reload.
+/// - `Modified` + dirty buffer: prompt user to discard local changes.
+/// - `Deleted`: clear file_path and mtime so subsequent saves go through Save As.
+fn poll_all_external_changes(app: &mut Application) {
+    // Collect Rcs first so we don't mutate `app` while iterating it.
+    let mut editors: Vec<Rc<RefCell<IdeEditorWindow>>> = Vec::new();
+    for i in 0..app.desktop.child_count() {
+        if let Some(shared) = app.desktop.child_at(i).as_any().downcast_ref::<SharedIdeEditorWindow>() {
+            editors.push(Rc::clone(&shared.0));
+        }
+    }
+
+    for editor in editors {
+        let state = editor.borrow().poll_external_changes();
+        match state {
+            ExternalState::Unchanged | ExternalState::NoFile => {}
+            ExternalState::Modified => {
+                let dirty = editor.borrow().is_dirty();
+                if !dirty {
+                    let _ = editor.borrow_mut().reload();
+                } else {
+                    use turbo_vision::views::msgbox::confirmation_box_yes_no;
+                    let name = editor.borrow().file_path()
+                        .as_deref()
+                        .and_then(|p| p.file_name())
+                        .and_then(|n| n.to_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "file".to_string());
+                    let answer = confirmation_box_yes_no(
+                        app,
+                        &format!("{name} changed on disk.\n\nReload and lose unsaved changes?"),
+                    );
+                    if answer == CM_YES {
+                        let _ = editor.borrow_mut().reload();
+                    } else {
+                        // User chose to keep local edits — refresh mtime so we don't
+                        // re-prompt on every tick. Best effort: a save() would do it,
+                        // but here we just mark the buffer as fresh-relative-to-disk
+                        // by reloading mtime via a dummy save_as round-trip would be
+                        // wrong. Instead, leave it; the reload prompt remains until
+                        // the user saves or accepts the reload.
+                    }
+                }
+            }
+            ExternalState::Deleted => {
+                editor.borrow_mut().set_file_path(None);
+            }
+        }
+    }
+}
+
+/// Mark the currently-focused desktop window as closed and remove it.
+fn close_focused_window(app: &mut Application) {
+    let count = app.desktop.child_count();
+    for i in 0..count {
+        if app.desktop.child_at(i).is_focused() {
+            let state = app.desktop.child_at(i).state();
+            app.desktop.child_at_mut(i).set_state(state | SF_CLOSED);
+            break;
+        }
+    }
+    app.desktop.remove_closed_windows();
+}
+
+/// If the focused editor is dirty, prompt save / discard / cancel. Returns true
+/// when it's safe to remove the window (saved or discarded).
+fn confirm_close_focused_editor(app: &mut Application) -> bool {
+    let Some(editor) = focused_editor(app) else { return true };
+    if !editor.borrow().is_dirty() { return true; }
+
+    let name = editor.borrow().file_path()
+        .as_deref()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "Untitled".to_string());
+
+    let result = message_box(
+        app,
+        &format!("{name} has been modified.\n\nSave changes?"),
+        MF_YES_BUTTON | MF_NO_BUTTON | MF_CANCEL_BUTTON,
+    );
+    match result {
+        CM_YES => {
+            // Save via FileEditor::save (or save_as if no path).
+            let has_path = editor.borrow().file_path().is_some();
+            if has_path {
+                editor.borrow_mut().save().is_ok()
+            } else {
+                editor.borrow_mut().prompt_save_as(app)
+            }
+        }
+        CM_NO => true,
+        _ => false,
+    }
+}
+
+/// On quit, walk every editor; for each dirty one, prompt save/discard/cancel.
+/// Returns false if the user cancels at any prompt.
+fn confirm_close_all_dirty_editors(app: &mut Application) -> bool {
+    // Snapshot editor Rcs first so prompts don't mutate the iteration.
+    let mut editors: Vec<Rc<RefCell<IdeEditorWindow>>> = Vec::new();
+    for i in 0..app.desktop.child_count() {
+        if let Some(shared) = app.desktop.child_at(i).as_any().downcast_ref::<SharedIdeEditorWindow>() {
+            editors.push(Rc::clone(&shared.0));
+        }
+    }
+
+    for editor in editors {
+        if !editor.borrow().is_dirty() { continue; }
+
+        let name = editor.borrow().file_path()
+            .as_deref()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "Untitled".to_string());
+
+        let result = message_box(
+            app,
+            &format!("{name} has been modified.\n\nSave changes?"),
+            MF_YES_BUTTON | MF_NO_BUTTON | MF_CANCEL_BUTTON,
+        );
+        match result {
+            CM_YES => {
+                let has_path = editor.borrow().file_path().is_some();
+                let saved = if has_path {
+                    editor.borrow_mut().save().is_ok()
+                } else {
+                    editor.borrow_mut().prompt_save_as(app)
+                };
+                if !saved { return false; }
+            }
+            CM_NO => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn centered_dialog_bounds(app: &Application) -> Rect {
+    let (tw, th) = app.terminal.size();
+    let dw = 64i16.min(tw as i16 - 4);
+    let dh = 18i16.min(th as i16 - 4);
+    let x = ((tw as i16) - dw) / 2;
+    let y = ((th as i16) - dh) / 2;
+    Rect::new(x, y, x + dw, y + dh)
 }
 
 // ── View wrapper ─────────────────────────────────────────

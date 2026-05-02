@@ -32,6 +32,18 @@ pub enum DebugEvent {
 /// The compiled program writes its output here via fprintf (see codegen.rs).
 const CONSOLE_FILE: &str = "/tmp/turbo_pascal_console.txt";
 
+/// Per-variable metadata loaded from `<exe>.bruto-meta`.
+#[derive(Debug, Clone)]
+pub enum VarMeta {
+    Enum(Vec<String>),                 // values in ordinal order
+    Set,                               // 4-word bitmask
+    VariantRecord {                    // tag + cases
+        tag_name: Option<String>,
+        fixed_fields: Vec<(String, String)>,    // (name, short type)
+        cases: Vec<(Vec<i64>, Vec<(String, String)>)>,
+    },
+}
+
 pub struct Debugger {
     pub state: DebugState,
     process: Option<Child>,
@@ -47,6 +59,8 @@ pub struct Debugger {
     next_bp_id: u32,
     pending_var_request: bool,
     accumulated_lines: Vec<String>,
+    /// Watch-window metadata loaded from <exe>.bruto-meta.
+    var_meta: HashMap<String, VarMeta>,
 }
 
 impl Debugger {
@@ -63,6 +77,28 @@ impl Debugger {
             next_bp_id: 1,
             pending_var_request: false,
             accumulated_lines: Vec::new(),
+            var_meta: HashMap::new(),
+        }
+    }
+
+    /// Load `<exe>.bruto-meta` (if present) into the variable metadata map.
+    fn load_metadata(&mut self, exe_path: &str) {
+        self.var_meta.clear();
+        let path = format!("{exe_path}.bruto-meta");
+        let Ok(contents) = std::fs::read_to_string(&path) else { return; };
+        for line in contents.lines() {
+            let parts: Vec<&str> = line.splitn(3, '|').collect();
+            if parts.len() < 2 { continue; }
+            let name = parts[0].to_string();
+            let kind = parts[1];
+            let extra = parts.get(2).copied().unwrap_or("");
+            let meta = match kind {
+                "enum" => VarMeta::Enum(extra.split(',').map(|s| s.to_string()).collect()),
+                "set" => VarMeta::Set,
+                "vrec" => parse_vrec(extra),
+                _ => continue,
+            };
+            self.var_meta.insert(name, meta);
         }
     }
 
@@ -77,6 +113,7 @@ impl Debugger {
         self.accumulated_lines.clear();
         self.pending_var_request = false;
         self.stop_flag.store(false, Ordering::Relaxed);
+        self.load_metadata(exe_path);
 
         // Truncate the console capture file (program writes here via fprintf)
         let _ = std::fs::write(CONSOLE_FILE, "");
@@ -338,7 +375,13 @@ impl Debugger {
             }
 
             if self.pending_var_request {
-                if let Some(var) = parse_variable_line(&line) {
+                if let Some(mut var) = parse_variable_line(&line) {
+                    // Override with Pascal-aware metadata if we have it.
+                    if let Some(meta) = self.var_meta.get(&var.0) {
+                        if let Some(formatted) = format_with_meta(meta, &var.1) {
+                            var.1 = formatted;
+                        }
+                    }
                     events.push(DebugEvent::Variables(vec![var]));
                 }
             }
@@ -479,6 +522,14 @@ fn format_variable_value(type_str: &str, raw: &str) -> String {
         }
     }
 
+    // Sets: stored as [4 x long] / [4 x i64]. Decode the 256-bit bitmask
+    // and display as Pascal set literal.
+    if (type_str == "long[4]" || type_str == "unsigned long[4]" || type_str == "i64[4]") && raw.starts_with('(') {
+        if let Some(s) = decode_set_bitmask(raw) {
+            return s;
+        }
+    }
+
     // Arrays: lldb shows ([0] = 1, [1] = 4, ...) — clean up index notation
     if type_str.contains('[') && raw.starts_with('(') {
         let mut cleaned = raw.to_string();
@@ -497,6 +548,160 @@ fn format_variable_value(type_str: &str, raw: &str) -> String {
     // Already readable format
 
     raw.to_string()
+}
+
+/// Parse the body of a `name|vrec|<body>` metadata line into a VarMeta.
+fn parse_vrec(body: &str) -> VarMeta {
+    let mut tag_name: Option<String> = None;
+    let mut fixed: Vec<(String, String)> = Vec::new();
+    let mut cases: Vec<(Vec<i64>, Vec<(String, String)>)> = Vec::new();
+    for part in body.split(';') {
+        if part.is_empty() { continue; }
+        if let Some(rest) = part.strip_prefix("__tag=") {
+            tag_name = Some(rest.to_string());
+        } else if let Some(rest) = part.strip_prefix("__case[") {
+            // [vals]=field=type,field=type
+            if let Some(end) = rest.find("]=") {
+                let vals_str = &rest[..end];
+                let fields_str = &rest[end + 2..];
+                let vals: Vec<i64> = vals_str.split(',').filter_map(|v| v.parse().ok()).collect();
+                let fs: Vec<(String, String)> = fields_str.split(',').filter_map(|f| {
+                    let (n, t) = f.split_once('=')?;
+                    Some((n.to_string(), t.to_string()))
+                }).collect();
+                cases.push((vals, fs));
+            }
+        } else if let Some((n, t)) = part.split_once('=') {
+            fixed.push((n.to_string(), t.to_string()));
+        }
+    }
+    VarMeta::VariantRecord { tag_name, fixed_fields: fixed, cases }
+}
+
+/// Apply Pascal-aware formatting to an lldb-formatted value.
+fn format_with_meta(meta: &VarMeta, raw: &str) -> Option<String> {
+    match meta {
+        VarMeta::Enum(values) => {
+            // raw is an integer like "2" — map to value name.
+            let n: i64 = raw.trim().parse().ok()?;
+            if (0..values.len() as i64).contains(&n) {
+                Some(format!("{} ({n})", values[n as usize]))
+            } else {
+                None
+            }
+        }
+        VarMeta::Set => {
+            // raw might already be `[...]` from decode_set_bitmask, or a struct dump.
+            if raw.starts_with('[') { return Some(raw.to_string()); }
+            decode_set_bitmask(raw)
+        }
+        VarMeta::VariantRecord { tag_name, fixed_fields, cases } => {
+            // raw is a struct dump like `(kind = 1, tag = 1, _u = (...))`.
+            // We extract tag value (if known), keep fixed fields, and surface
+            // active variant fields.
+            let inner = raw.trim().trim_start_matches('(').trim_end_matches(')');
+            let mut tag_value: Option<i64> = None;
+            let mut keep: Vec<String> = Vec::new();
+            // Naive top-level split honoring one level of parens.
+            let entries = split_top_level(inner);
+            for entry in entries {
+                let trimmed = entry.trim();
+                if let Some((n, v)) = trimmed.split_once('=') {
+                    let fname = n.trim();
+                    let fval = v.trim();
+                    if Some(fname.to_string()) == *tag_name {
+                        tag_value = fval.parse().ok();
+                        keep.push(format!("{fname}={fval}"));
+                    } else if fixed_fields.iter().any(|(n, _)| n == fname) {
+                        keep.push(format!("{fname}={fval}"));
+                    }
+                    // Skip _u union dump
+                }
+            }
+            if let Some(tv) = tag_value {
+                if let Some((_, fields)) = cases.iter().find(|(vs, _)| vs.contains(&tv)) {
+                    keep.push(format!("[case {tv}: {} fields]", fields.len()));
+                    for (fname, _) in fields {
+                        keep.push(format!("(.{fname})"));
+                    }
+                }
+            }
+            Some(format!("({})", keep.join(", ")))
+        }
+    }
+}
+
+/// Split `inner` on commas at depth 0 (ignoring those inside parens).
+fn split_top_level(inner: &str) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut buf = String::new();
+    let mut depth = 0i32;
+    for c in inner.chars() {
+        match c {
+            '(' | '{' | '[' => { depth += 1; buf.push(c); }
+            ')' | '}' | ']' => { depth -= 1; buf.push(c); }
+            ',' if depth == 0 => { parts.push(std::mem::take(&mut buf)); }
+            _ => buf.push(c),
+        }
+    }
+    if !buf.is_empty() { parts.push(buf); }
+    parts
+}
+
+/// Decode a 4-word set bitmask from lldb output like
+/// `([0] = 0x000000000000000a, [1] = 0, [2] = 0, [3] = 0)` into `[1, 3]`.
+fn decode_set_bitmask(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_start_matches('(').trim_end_matches(')');
+    let mut words: [u64; 4] = [0; 4];
+    let mut count = 0;
+    for part in trimmed.split(',') {
+        let after_eq = part.split('=').nth(1)?.trim();
+        let val: u64 = if let Some(rest) = after_eq.strip_prefix("0x") {
+            u64::from_str_radix(rest.trim(), 16).ok()?
+        } else {
+            after_eq.parse::<i64>().ok()? as u64
+        };
+        if count < 4 {
+            words[count] = val;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return None;
+    }
+    // Decode into ordinals.
+    let mut ordinals: Vec<u32> = Vec::new();
+    for (i, &w) in words.iter().enumerate() {
+        if w == 0 { continue; }
+        for b in 0..64u32 {
+            if (w >> b) & 1 == 1 {
+                ordinals.push((i as u32) * 64 + b);
+            }
+        }
+    }
+    if ordinals.is_empty() {
+        return Some("[]".to_string());
+    }
+    // Compress consecutive ranges.
+    let mut parts: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < ordinals.len() {
+        let start = ordinals[i];
+        let mut end = start;
+        while i + 1 < ordinals.len() && ordinals[i + 1] == end + 1 {
+            i += 1;
+            end = ordinals[i];
+        }
+        if end == start {
+            parts.push(start.to_string());
+        } else if end == start + 1 {
+            parts.push(format!("{start},{end}"));
+        } else {
+            parts.push(format!("{start}..{end}"));
+        }
+        i += 1;
+    }
+    Some(format!("[{}]", parts.join(", ")))
 }
 
 fn parse_exit_code(line: &str) -> Option<i32> {
