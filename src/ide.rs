@@ -41,6 +41,17 @@ struct IdeState {
     exe_path: Option<String>,
     console_capture_path: Option<String>,
     exec_line: Option<usize>,
+    /// Editor whose breakpoints are being mirrored into the live lldb session.
+    /// Set when Debug→Start succeeds, cleared on Stop/Exit. Tracking the
+    /// specific editor (rather than always reading from `focused_editor`)
+    /// means switching focus to a sibling buffer mid-session doesn't
+    /// confuse the breakpoint sync.
+    debug_editor: Option<Rc<RefCell<IdeEditorWindow>>>,
+    /// Cached set of breakpoint lines we last pushed into lldb. Compared
+    /// each tick against `debug_editor`'s gutter so user clicks on the
+    /// gutter while the process is running translate into
+    /// `breakpoint set` / `breakpoint delete` immediately.
+    debug_synced_bps: std::collections::HashSet<usize>,
     /// Layout for each new editor window (full editor area). All editors
     /// stack on top of each other at this rect; the user can drag/resize.
     editor_bounds: Rect,
@@ -74,6 +85,15 @@ fn install_watch_window(
     watch_bounds: Rect,
     watch: &Rc<RefCell<WatchPanel>>,
 ) -> turbo_vision::views::view::ViewId {
+    // Reset the panel's bounds back to interior-relative before re-adding.
+    // After the first install, Group::add() rewrote them to absolute window
+    // coordinates; without this reset, the second install would offset the
+    // (already-absolute) bounds by the new window's position and the panel
+    // would render off-screen.
+    let interior_w = watch_bounds.width() - 2;
+    let interior_h = watch_bounds.height() - 2;
+    watch.borrow_mut().set_bounds(Rect::new(0, 0, interior_w, interior_h));
+
     let mut watch_win = turbo_vision::views::window::Window::new(watch_bounds, "Watches");
     watch_win.add(Box::new(WatchView(Rc::clone(watch))));
     {
@@ -142,6 +162,8 @@ pub fn run(language: Box<dyn Language>) -> turbo_vision::core::error::Result<()>
         exe_path: None,
         console_capture_path: None,
         exec_line: None,
+        debug_editor: None,
+        debug_synced_bps: std::collections::HashSet::new(),
         editor_bounds,
         save_wildcard,
         untitled_title,
@@ -156,6 +178,7 @@ pub fn run(language: Box<dyn Language>) -> turbo_vision::core::error::Result<()>
     // ── Event loop ───────────────────────────────────────
     app.running = true;
     while app.running {
+        update_command_states(&mut app, &ide);
         app.terminal.force_full_redraw();
         app.desktop.draw(&mut app.terminal);
         if let Some(ref mut mb) = app.menu_bar {
@@ -196,6 +219,8 @@ pub fn run(language: Box<dyn Language>) -> turbo_vision::core::error::Result<()>
                         ide.exec_line = None;
                         ide.watch_vars.clear();
                         ide.debugger.stop();
+                        ide.debug_editor = None;
+                        ide.debug_synced_bps.clear();
                         let color = if code == 0 { SUCCESS } else { ERROR };
                         append_output_line(
                             &mut output_term.borrow_mut(),
@@ -206,6 +231,10 @@ pub fn run(language: Box<dyn Language>) -> turbo_vision::core::error::Result<()>
                 }
             }
         }
+
+        // Mirror gutter breakpoint toggles into the running lldb session
+        // (no-op when the debugger isn't active).
+        sync_debug_breakpoints(&mut ide);
 
         // Update watch and per-editor exec-line state
         watch.borrow_mut().set_variables(ide.watch_vars.clone());
@@ -390,6 +419,8 @@ fn handle_command(
             ide.debugger.stop();
             ide.exec_line = None;
             ide.watch_vars.clear();
+            ide.debug_editor = None;
+            ide.debug_synced_bps.clear();
             append_output_line(&mut output_rc.borrow_mut(), "Debugger stopped.", Some(CONSOLE_INFO));
             true
         }
@@ -610,12 +641,91 @@ fn handle_debug_start_continue(
     output.clear();
 
     match ide.debugger.start(&exe_path, &source_file, &bp_lines) {
-        Ok(()) => append_output_line(output, "Debugger started.", Some(SUCCESS)),
+        Ok(()) => {
+            // Remember which editor's breakpoints to mirror into lldb each
+            // tick — see `sync_debug_breakpoints`.
+            ide.debug_editor = Some(Rc::clone(&editor));
+            ide.debug_synced_bps = bp_lines.iter().copied().collect();
+            append_output_line(output, "Debugger started.", Some(SUCCESS));
+        }
         Err(e) => append_output_line(output, &format!("Debugger error: {}", e), Some(ERROR)),
     }
 }
 
+/// While the debugger is running, mirror the debugged editor's gutter
+/// breakpoints into lldb so toggles via the gutter take effect without a
+/// restart. Diffs against the last pushed set and issues only the
+/// add/remove deltas. No-op when the debugger isn't running or no editor
+/// is attached.
+fn sync_debug_breakpoints(ide: &mut IdeState) {
+    if !ide.debugger.is_running() { return; }
+    let Some(ref editor) = ide.debug_editor else { return };
+
+    let desired: std::collections::HashSet<usize> =
+        editor.borrow().breakpoint_lines().into_iter().collect();
+    if desired == ide.debug_synced_bps { return; }
+
+    let to_remove: Vec<usize> =
+        ide.debug_synced_bps.difference(&desired).copied().collect();
+    let to_add: Vec<usize> =
+        desired.difference(&ide.debug_synced_bps).copied().collect();
+
+    for line in &to_remove {
+        let _ = ide.debugger.remove_breakpoint(*line);
+    }
+    for line in &to_add {
+        let _ = ide.debugger.add_breakpoint(*line);
+    }
+
+    ide.debug_synced_bps = desired;
+}
+
 // ── Window/desktop navigation ────────────────────────────
+
+/// Toggle command-set entries (the global enable/disable bitset that
+/// `MenuBar` consults when drawing menu items) based on the current IDE
+/// state. Called every tick; greys out commands that don't make sense
+/// right now so the user gets immediate visual feedback.
+///
+/// Rules:
+/// - Save / Save As / Build / Run / Close-Editor / Debug Start: an editor
+///   window must be focused.
+/// - Step Over / Step Into / Stop / Continue: the debugger must be running.
+/// - Show Watches: the Watches window must be currently closed.
+/// - Show Output:  the Output window must be currently closed.
+fn update_command_states(app: &mut Application, ide: &IdeState) {
+    use turbo_vision::core::command_set::{disable_command, enable_command};
+
+    let editor_focused = focused_editor(app).is_some();
+    let dbg_running = ide.debugger.is_running();
+    let watch_open = ide.watch_win_id.is_some();
+    let output_open = ide.output_win_id.is_some();
+
+    let toggle = |cmd: u16, enabled: bool| {
+        if enabled { enable_command(cmd); } else { disable_command(cmd); }
+    };
+
+    // Editor-bound commands
+    toggle(CM_SAVE, editor_focused);
+    toggle(CM_SAVE_AS, editor_focused);
+    toggle(CM_BUILD, editor_focused);
+    toggle(CM_RUN, editor_focused);
+    toggle(CM_CLOSE_EDITOR, editor_focused);
+
+    // Debugger-bound commands.
+    // CM_DEBUG_START is the same menu entry as continue (~S~tart / Continue);
+    // the handler dispatches based on dbg_running, so we keep it enabled in
+    // both states as long as there's an editor to operate on.
+    toggle(CM_DEBUG_START, editor_focused);
+    toggle(CM_DEBUG_CONTINUE, dbg_running);
+    toggle(CM_DEBUG_STEP_OVER, dbg_running);
+    toggle(CM_DEBUG_STEP_INTO, dbg_running);
+    toggle(CM_DEBUG_STOP, dbg_running);
+
+    // Window menu — only offer to re-open closed panels
+    toggle(CM_SHOW_WATCHES, !watch_open);
+    toggle(CM_SHOW_OUTPUT, !output_open);
+}
 
 /// Find the first child of the desktop that is both a `SharedIdeEditorWindow`
 /// wrapper and currently focused, and return its underlying `Rc`.
