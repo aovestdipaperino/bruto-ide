@@ -34,6 +34,24 @@ use turbo_vision::views::status_line::{StatusItem, StatusLine};
 use turbo_vision::views::terminal_widget::TerminalWidget;
 use turbo_vision::views::View;
 
+/// Host-application hooks that influence first-run behaviour. The IDE itself
+/// stays agnostic of any config file format — the host owns persistence and
+/// passes a callback that fires once after the About dialog is shown.
+pub struct IdeOptions {
+    /// When true, the IDE pops the About dialog once before the user
+    /// interacts with anything else.
+    pub show_about_on_start: bool,
+    /// Invoked exactly once, immediately after the first-run About dialog
+    /// is dismissed, so the host can flip its persistent flag to false.
+    pub on_about_shown: Option<Box<dyn FnMut()>>,
+}
+
+impl Default for IdeOptions {
+    fn default() -> Self {
+        Self { show_about_on_start: false, on_about_shown: None }
+    }
+}
+
 struct IdeState {
     debugger: Debugger,
     watch_vars: Vec<(String, String)>,
@@ -116,6 +134,14 @@ fn append_output_line(panel: &mut TerminalWidget, text: &str, attr: Option<Attr>
 
 /// Run the IDE with the given language implementation.
 pub fn run(language: Box<dyn Language>) -> turbo_vision::core::error::Result<()> {
+    run_with_options(language, IdeOptions::default())
+}
+
+/// Run the IDE with optional host-supplied first-run behaviour.
+pub fn run_with_options(
+    language: Box<dyn Language>,
+    mut options: IdeOptions,
+) -> turbo_vision::core::error::Result<()> {
     let mut app = Application::new()?;
     let (width, height) = app.terminal.size();
     let w = width as i16;
@@ -140,20 +166,21 @@ pub fn run(language: Box<dyn Language>) -> turbo_vision::core::error::Result<()>
     let save_wildcard = format!("*.{}", language.file_extension());
     let untitled_title = format!("Untitled.{}", language.file_extension());
 
-    // ── Watch window ────────────────────────────────────────
+    // ── Watch window (hidden at start; host can re-open via Window menu) ─
     let watch_bounds = Rect::new(editor_right, desktop_top, w, editor_bottom);
     let watch_interior_w = watch_bounds.width() - 2;
     let watch_interior_h = watch_bounds.height() - 2;
     let watch = Rc::new(RefCell::new(WatchPanel::new(
         Rect::new(0, 0, watch_interior_w, watch_interior_h),
     )));
-    let watch_win_id = install_watch_window(&mut app, watch_bounds, &watch);
 
-    // ── Output panel ───────────────────────────────────────
+    // ── Output buffer (hidden at start; survives close/re-open) ─────────
     let output_bounds = Rect::new(0, editor_bottom, w, desktop_bottom);
-    let output_panel = OutputPanel::new(output_bounds, "Output");
-    let output_term = output_panel.terminal_rc();
-    let output_win_id = app.desktop.add(Box::new(output_panel));
+    let output_interior_w = output_bounds.width() - 2;
+    let output_interior_h = output_bounds.height() - 2;
+    let output_term = Rc::new(RefCell::new(TerminalWidget::new(
+        Rect::new(0, 0, output_interior_w, output_interior_h),
+    )));
 
     let mut ide = IdeState {
         debugger: Debugger::new(),
@@ -169,14 +196,15 @@ pub fn run(language: Box<dyn Language>) -> turbo_vision::core::error::Result<()>
         untitled_title,
         watch_bounds,
         output_bounds,
-        watch_win_id: Some(watch_win_id),
-        output_win_id: Some(output_win_id),
+        watch_win_id: None,
+        output_win_id: None,
         watch: Rc::clone(&watch),
         output_term: Rc::clone(&output_term),
     };
 
     // ── Event loop ───────────────────────────────────────
     app.running = true;
+    let mut pending_about = options.show_about_on_start;
     while app.running {
         update_command_states(&mut app, &ide);
         app.terminal.force_full_redraw();
@@ -188,6 +216,14 @@ pub fn run(language: Box<dyn Language>) -> turbo_vision::core::error::Result<()>
             sl.draw(&mut app.terminal);
         }
         let _ = app.terminal.flush();
+
+        if pending_about {
+            pending_about = false;
+            show_about_dialog(&mut app, language.name());
+            if let Some(cb) = options.on_about_shown.as_mut() {
+                cb();
+            }
+        }
 
         // Poll debugger
         if ide.debugger.is_running() {
@@ -427,11 +463,7 @@ fn handle_command(
         CM_DEBUG_STEP_OVER => { if ide.debugger.is_running() { let _ = ide.debugger.step_over(); } true }
         CM_DEBUG_STEP_INTO => { if ide.debugger.is_running() { let _ = ide.debugger.step_into(); } true }
         CM_ABOUT => {
-            use turbo_vision::views::msgbox::message_box_ok;
-            message_box_ok(app, &format!(
-                "Bruto IDE\n\nVersion 0.1.0\n\nLanguage: {}\n\nBuilt with Turbo Vision for Rust\n\n(c) 2026 Enzo Lombardi",
-                language.name(),
-            ));
+            show_about_dialog(app, language.name());
             true
         }
         _ => false,
@@ -898,6 +930,14 @@ fn confirm_close_all_dirty_editors(app: &mut Application) -> bool {
         }
     }
     true
+}
+
+fn show_about_dialog(app: &mut Application, language_name: &str) {
+    use turbo_vision::views::msgbox::message_box_ok;
+    message_box_ok(app, &format!(
+        "Bruto IDE\n\nVersion 0.1.0\n\nLanguage: {}\n\nBuilt with Turbo Vision for Rust\n\n(c) 2026 Enzo Lombardi",
+        language_name,
+    ));
 }
 
 fn centered_dialog_bounds(app: &Application) -> Rect {
