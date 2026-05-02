@@ -389,6 +389,9 @@ fn handle_command(
             true
         }
         CM_CLOSE_EDITOR => {
+            if !confirm_close_debug_editor(app, ide) {
+                return true;
+            }
             if !confirm_close_focused_editor(app) {
                 return true;
             }
@@ -854,6 +857,32 @@ fn close_focused_window(app: &mut Application) {
         }
     }
     app.desktop.remove_closed_windows();
+}
+
+/// If the focused editor is the active debug target, prompt the user; on
+/// confirmation, stop the debugger so the close can proceed. Returns false
+/// when the user cancels (the close should be aborted).
+fn confirm_close_debug_editor(app: &mut Application, ide: &mut IdeState) -> bool {
+    let Some(editor) = focused_editor(app) else { return true };
+    let is_debug_target = match &ide.debug_editor {
+        Some(de) => ide.debugger.is_running() && Rc::ptr_eq(de, &editor),
+        None => false,
+    };
+    if !is_debug_target { return true; }
+
+    use turbo_vision::views::msgbox::confirmation_box_yes_no;
+    let answer = confirmation_box_yes_no(
+        app,
+        "Closing this window will stop debugging.\n\nDo you want to close it?",
+    );
+    if answer != CM_YES { return false; }
+
+    ide.debugger.stop();
+    ide.exec_line = None;
+    ide.watch_vars.clear();
+    ide.debug_editor = None;
+    ide.debug_synced_bps.clear();
+    true
 }
 
 /// If the focused editor is dirty, prompt save / discard / cancel. Returns true
