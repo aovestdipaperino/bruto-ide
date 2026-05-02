@@ -150,6 +150,10 @@ pub struct IdeEditorWindow {
 impl IdeEditorWindow {
     pub fn new(bounds: Rect, title: &str, save_wildcard: &str) -> Self {
         let mut window = Window::new(bounds, title);
+        // Opt out of auto-close so CM_CLOSE bubbles up to the IDE main loop,
+        // which translates it into CM_CLOSE_EDITOR and shows a save prompt
+        // before destroying the editor buffer.
+        window.set_auto_close(false);
 
         let win_w = bounds.width();
         let win_h = bounds.height();

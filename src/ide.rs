@@ -48,6 +48,40 @@ struct IdeState {
     save_wildcard: String,
     /// Default title for an Untitled buffer, e.g. `"Untitled.pas"`.
     untitled_title: String,
+    /// Layout used to (re-)spawn the Watches window.
+    watch_bounds: Rect,
+    /// Layout used to (re-)spawn the Output panel.
+    output_bounds: Rect,
+    /// `Some(id)` while the Watches window is on the desktop. Cleared each tick
+    /// when `Desktop::contains_id` reports the user closed it.
+    watch_win_id: Option<turbo_vision::views::view::ViewId>,
+    /// Same idea for the Output panel.
+    output_win_id: Option<turbo_vision::views::view::ViewId>,
+    /// Shared Watches model — survives close/re-open so the variable list
+    /// persists.
+    watch: Rc<RefCell<WatchPanel>>,
+    /// Shared Output buffer — survives close/re-open so build / run history
+    /// isn't lost.
+    output_term: Rc<RefCell<TerminalWidget>>,
+}
+
+/// Wrap a fresh Watches `Window` around the shared [`WatchPanel`] and add it
+/// to the desktop. Returns the resulting `ViewId` so the caller can poll
+/// presence and re-spawn after close. Pulled out so the boot path and
+/// `CM_SHOW_WATCHES` use the same code.
+fn install_watch_window(
+    app: &mut Application,
+    watch_bounds: Rect,
+    watch: &Rc<RefCell<WatchPanel>>,
+) -> turbo_vision::views::view::ViewId {
+    let mut watch_win = turbo_vision::views::window::Window::new(watch_bounds, "Watches");
+    watch_win.add(Box::new(WatchView(Rc::clone(watch))));
+    {
+        use turbo_vision::core::state::SF_SHADOW;
+        let state = watch_win.state();
+        watch_win.set_state(state & !SF_SHADOW);
+    }
+    app.desktop.add(Box::new(watch_win))
 }
 
 const OUTPUT_TEXT: Attr = Attr::new(TvColor::LightGray, TvColor::Black);
@@ -93,20 +127,13 @@ pub fn run(language: Box<dyn Language>) -> turbo_vision::core::error::Result<()>
     let watch = Rc::new(RefCell::new(WatchPanel::new(
         Rect::new(0, 0, watch_interior_w, watch_interior_h),
     )));
-    let mut watch_win = turbo_vision::views::window::Window::new(watch_bounds, "Watches");
-    watch_win.add(Box::new(WatchView(Rc::clone(&watch))));
-    {
-        use turbo_vision::core::state::SF_SHADOW;
-        let state = watch_win.state();
-        watch_win.set_state(state & !SF_SHADOW);
-    }
-    app.desktop.add(Box::new(watch_win));
+    let watch_win_id = install_watch_window(&mut app, watch_bounds, &watch);
 
     // ── Output panel ───────────────────────────────────────
     let output_bounds = Rect::new(0, editor_bottom, w, desktop_bottom);
     let output_panel = OutputPanel::new(output_bounds, "Output");
     let output_term = output_panel.terminal_rc();
-    app.desktop.add(Box::new(output_panel));
+    let output_win_id = app.desktop.add(Box::new(output_panel));
 
     let mut ide = IdeState {
         debugger: Debugger::new(),
@@ -118,6 +145,12 @@ pub fn run(language: Box<dyn Language>) -> turbo_vision::core::error::Result<()>
         editor_bounds,
         save_wildcard,
         untitled_title,
+        watch_bounds,
+        output_bounds,
+        watch_win_id: Some(watch_win_id),
+        output_win_id: Some(output_win_id),
+        watch: Rc::clone(&watch),
+        output_term: Rc::clone(&output_term),
     };
 
     // ── Event loop ───────────────────────────────────────
@@ -249,6 +282,21 @@ pub fn run(language: Box<dyn Language>) -> turbo_vision::core::error::Result<()>
                     );
                     if handled { event.clear(); }
                 }
+
+                // Sweep any windows that self-closed during dispatch (Window::auto_close).
+                // Editors don't auto-close — they bubble CM_CLOSE up so confirm_close_focused_editor
+                // can prompt save first; for them, close_focused_window does the SF_CLOSED + sweep.
+                app.desktop.remove_closed_windows();
+
+                // After the sweep, check whether the Watches / Output windows are
+                // still on the desktop. If not (user clicked their close button),
+                // forget the saved id so the Window menu re-enables their entries.
+                if let Some(id) = ide.watch_win_id {
+                    if !app.desktop.contains_id(id) { ide.watch_win_id = None; }
+                }
+                if let Some(id) = ide.output_win_id {
+                    if !app.desktop.contains_id(id) { ide.output_win_id = None; }
+                }
             }
             Ok(None) => {}
             Err(_) => {}
@@ -283,12 +331,32 @@ fn handle_command(
             true
         }
         CM_CLOSE => {
-            // Watch / Output close button: close that window without prompting.
+            // Fallback for any window that opted out of auto_close and bubbles
+            // CM_CLOSE up. Watch and Output use auto_close=true and never reach
+            // here. Editor windows translate CM_CLOSE → CM_CLOSE_EDITOR before
+            // it gets here, so this is mostly defensive.
             close_focused_window(app);
             true
         }
         CM_NEW => {
             new_editor_window(app, language, ide);
+            true
+        }
+        CM_SHOW_WATCHES => {
+            if ide.watch_win_id.is_none() {
+                let id = install_watch_window(app, ide.watch_bounds, &ide.watch);
+                ide.watch_win_id = Some(id);
+            }
+            true
+        }
+        CM_SHOW_OUTPUT => {
+            if ide.output_win_id.is_none() {
+                let panel = OutputPanel::with_terminal(
+                    ide.output_bounds, "Output", Rc::clone(&ide.output_term),
+                );
+                let id = app.desktop.add(Box::new(panel));
+                ide.output_win_id = Some(id);
+            }
             true
         }
         CM_OPEN => {
@@ -767,6 +835,10 @@ fn build_menu_bar(width: i16) -> MenuBar {
         MenuItem::separator(),
         MenuItem::with_shortcut("Sto~p~", CM_DEBUG_STOP, 0, "Shift-F5", 0),
     ]);
+    let window_menu = Menu::from_items(vec![
+        MenuItem::with_shortcut("~W~atches", CM_SHOW_WATCHES, 0, "", 0),
+        MenuItem::with_shortcut("~O~utput", CM_SHOW_OUTPUT, 0, "", 0),
+    ]);
     let about_menu = Menu::from_items(vec![
         MenuItem::with_shortcut("~A~bout...", CM_ABOUT, 0, "", 0),
     ]);
@@ -775,6 +847,7 @@ fn build_menu_bar(width: i16) -> MenuBar {
     menu_bar.add_submenu(SubMenu::new("~F~ile", file_menu));
     menu_bar.add_submenu(SubMenu::new("~B~uild", build_menu));
     menu_bar.add_submenu(SubMenu::new("~D~ebug", debug_menu));
+    menu_bar.add_submenu(SubMenu::new("~W~indows", window_menu));
     menu_bar.add_submenu(SubMenu::new("~H~elp", about_menu));
     menu_bar
 }

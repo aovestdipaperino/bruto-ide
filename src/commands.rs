@@ -48,3 +48,9 @@ pub const CM_ABOUT: u16 = 430;
 /// EditorWindow window close request (translated from CM_CLOSE by IdeEditorWindow
 /// so the IDE can show a save prompt before removing the editor).
 pub const CM_CLOSE_EDITOR: u16 = 440;
+
+/// Re-open the Watches window (Window menu) after the user closed it.
+pub const CM_SHOW_WATCHES: u16 = 441;
+
+/// Re-open the Output window (Window menu) after the user closed it.
+pub const CM_SHOW_OUTPUT: u16 = 442;
