@@ -7,7 +7,7 @@
 /// focused editor, looked up dynamically via [`focused_editor`].
 
 use crate::commands::*;
-use crate::debugger::{DebugEvent, Debugger};
+use crate::debugger::{DebugEvent, Debugger, VarType};
 use crate::ide_editor::{IdeEditorWindow, SharedIdeEditorWindow};
 use crate::ide_file_editor::IdeFileEditor;
 use bruto_lang::language::Language;
@@ -54,7 +54,7 @@ impl Default for IdeOptions {
 
 struct IdeState {
     debugger: Debugger,
-    watch_vars: Vec<(String, String)>,
+    watch_vars: Vec<(String, String, VarType)>,
     source_path: Option<String>,
     exe_path: Option<String>,
     console_capture_path: Option<String>,
@@ -112,7 +112,11 @@ fn install_watch_window(
     let interior_h = watch_bounds.height() - 2;
     watch.borrow_mut().set_bounds(Rect::new(0, 0, interior_w, interior_h));
 
-    let mut watch_win = turbo_vision::views::window::Window::new(watch_bounds, "Watches");
+    let mut watch_win = turbo_vision::views::window::Window::new_with_type(
+        watch_bounds,
+        "Watches",
+        turbo_vision::views::window::WindowPaletteType::Gray,
+    );
     watch_win.add(Box::new(WatchView(Rc::clone(watch))));
     {
         use turbo_vision::core::state::SF_SHADOW;
@@ -142,6 +146,7 @@ pub fn run_with_options(
     language: Box<dyn Language>,
     mut options: IdeOptions,
 ) -> turbo_vision::core::error::Result<()> {
+    install_panic_log_hook();
     let mut app = Application::new()?;
     let (width, height) = app.terminal.size();
     let w = width as i16;
@@ -234,17 +239,18 @@ pub fn run_with_options(
                         ide.exec_line = Some(line);
                     }
                     DebugEvent::Variables(vars) => {
-                        for (name, value) in vars {
+                        for (name, value, ty) in vars {
                             let mut found = false;
-                            for (n, v) in &mut ide.watch_vars {
-                                if *n == name {
-                                    *v = value.clone();
+                            for entry in &mut ide.watch_vars {
+                                if entry.0 == name {
+                                    entry.1 = value.clone();
+                                    entry.2 = ty;
                                     found = true;
                                     break;
                                 }
                             }
                             if !found {
-                                ide.watch_vars.push((name, value));
+                                ide.watch_vars.push((name, value, ty));
                             }
                         }
                     }
@@ -361,6 +367,16 @@ pub fn run_with_options(
                 }
                 if let Some(id) = ide.output_win_id {
                     if !app.desktop.contains_id(id) { ide.output_win_id = None; }
+                }
+
+                // Did the user just double-click a watch row? Open the
+                // type-aware value editor and push the result into lldb.
+                // Extract the row into a local *before* the call, so the
+                // borrow_mut() RefMut is dropped — handle_watch_edit
+                // re-borrows the same RefCell.
+                let pending_watch_edit = watch.borrow_mut().take_pending_edit();
+                if let Some(row) = pending_watch_edit {
+                    handle_watch_edit(&mut app, &mut ide, row);
                 }
             }
             Ok(None) => {}
@@ -959,6 +975,87 @@ fn confirm_close_all_dirty_editors(app: &mut Application) -> bool {
         }
     }
     true
+}
+
+/// Open the type-aware editor for the watch row that was just double-clicked.
+/// No-op (with feedback dialog) when the variable type isn't editable or the
+/// debugger isn't paused. The dialog itself lives in `value_editor` so other
+/// languages can reuse it.
+fn handle_watch_edit(app: &mut Application, ide: &mut IdeState, row: usize) {
+    use turbo_vision::views::msgbox::{message_box_error, message_box_ok};
+
+    let entry = ide
+        .watch
+        .borrow()
+        .variable_at(row)
+        .map(|(n, v, t)| (n.clone(), v.clone(), *t));
+    let Some((name, current, ty)) = entry else { return };
+
+    if !ide.debugger.is_paused() {
+        message_box_ok(app, "The program must be paused at a breakpoint to set a value.");
+        return;
+    }
+
+    if !ty.is_editable() {
+        message_box_ok(app, &format!(
+            "Variables of type {} are read-only in the watch window.",
+            ty.label(),
+        ));
+        return;
+    }
+
+    let Some(new_value) = crate::value_editor::prompt_set_value(app, &name, ty, &current) else {
+        return;
+    };
+    let Some(expr_value) = crate::value_editor::format_setter_expr(ty, &new_value) else {
+        message_box_error(app, &format!(
+            "'{new_value}' is not a valid {} literal.",
+            ty.label(),
+        ));
+        return;
+    };
+
+    if let Err(e) = ide.debugger.set_variable(&name, &expr_value) {
+        message_box_error(app, &format!("lldb error: {e}"));
+    }
+}
+
+/// Install a process-wide panic hook that appends the panic message + a
+/// short backtrace to `/tmp/bruto-ide-panic.log` before chaining to the
+/// default hook. The IDE runs inside crossterm's alt-screen, so the
+/// default stderr panic message is wiped when the app teardown switches
+/// back to the primary screen — without this, panics look like silent
+/// exits. Idempotent across repeat IDE invocations.
+fn install_panic_log_hook() {
+    use std::sync::Once;
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/bruto-ide-panic.log")
+            {
+                let _ = writeln!(
+                    f,
+                    "[{}] {info}\nbacktrace:\n{}",
+                    chrono_now(),
+                    std::backtrace::Backtrace::force_capture(),
+                );
+            }
+            default_hook(info);
+        }));
+    });
+}
+
+fn chrono_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| format!("{}s since epoch", d.as_secs()))
+        .unwrap_or_else(|_| "unknown time".into())
 }
 
 fn show_about_dialog(app: &mut Application, language_name: &str) {

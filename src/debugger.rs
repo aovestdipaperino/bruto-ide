@@ -23,10 +23,68 @@ pub enum DebugState {
 #[derive(Debug, Clone)]
 pub enum DebugEvent {
     Stopped { file: String, line: usize },
-    Variables(Vec<(String, String)>),
+    Variables(Vec<(String, String, VarType)>),
     /// Program output (from the debuggee's stdout, not lldb).
     ProgramOutput(String),
     Exited { code: i32 },
+}
+
+/// Coarse Pascal-flavoured classification of an lldb variable's type, used
+/// to drive the type-aware value editor in the watch window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VarType {
+    Integer,
+    Real,
+    Boolean,
+    Char,
+    String,
+    Other,
+}
+
+impl VarType {
+    pub fn label(self) -> &'static str {
+        match self {
+            VarType::Integer => "integer",
+            VarType::Real => "real",
+            VarType::Boolean => "boolean",
+            VarType::Char => "char",
+            VarType::String => "string",
+            VarType::Other => "value",
+        }
+    }
+
+    /// True when the IDE knows how to format a setter for `expr` and can
+    /// validate user input — anything else is read-only in the watch.
+    pub fn is_editable(self) -> bool {
+        !matches!(self, VarType::Other | VarType::String)
+    }
+}
+
+/// Map an lldb type string (the bit between parentheses, e.g. "long",
+/// "char *", "double") to a coarse VarType.
+pub fn classify_var_type(type_str: &str) -> VarType {
+    let t = type_str.trim();
+    if t == "char *" || t == "const char *" {
+        return VarType::String;
+    }
+    if t == "char" || t == "signed char" {
+        return VarType::Char;
+    }
+    if t == "bool" || t == "unsigned char" {
+        return VarType::Boolean;
+    }
+    if t == "double" || t == "float" {
+        return VarType::Real;
+    }
+    let int_types = [
+        "long", "unsigned long", "long long", "unsigned long long",
+        "int", "unsigned int", "short", "unsigned short", "i64", "i32",
+        "i16", "i8", "u64", "u32", "u16", "u8",
+    ];
+    if int_types.contains(&t) {
+        return VarType::Integer;
+    }
+    VarType::Other
 }
 
 /// The compiled program writes its output here via fprintf (see codegen.rs).
@@ -270,6 +328,17 @@ impl Debugger {
         Ok(())
     }
 
+    /// Send `expr <name> = <expr>` to lldb to mutate a paused-program variable
+    /// and request a fresh `frame variable` dump so the watch panel updates.
+    /// `expr_value` must already be a valid C/C++ expression (e.g. `42`,
+    /// `3.14`, `'A'`, `true`); the caller is responsible for quoting.
+    pub fn set_variable(&mut self, name: &str, expr_value: &str) -> Result<(), String> {
+        self.send_command(&format!("expr {name} = {expr_value}"))?;
+        self.pending_var_request = true;
+        self.send_command("frame variable")?;
+        Ok(())
+    }
+
     pub fn add_breakpoint(&mut self, line: usize) -> Result<(), String> {
         let source_basename = std::path::Path::new(&self.source_file)
             .file_name()
@@ -375,14 +444,15 @@ impl Debugger {
             }
 
             if self.pending_var_request {
-                if let Some(mut var) = parse_variable_line(&line) {
+                if let Some((name, mut value, type_str)) = parse_variable_line(&line) {
                     // Override with Pascal-aware metadata if we have it.
-                    if let Some(meta) = self.var_meta.get(&var.0) {
-                        if let Some(formatted) = format_with_meta(meta, &var.1) {
-                            var.1 = formatted;
+                    if let Some(meta) = self.var_meta.get(&name) {
+                        if let Some(formatted) = format_with_meta(meta, &value) {
+                            value = formatted;
                         }
                     }
-                    events.push(DebugEvent::Variables(vec![var]));
+                    let ty = classify_var_type(&type_str);
+                    events.push(DebugEvent::Variables(vec![(name, value, ty)]));
                 }
             }
 
@@ -438,7 +508,7 @@ fn parse_frame_location(line: &str) -> Option<(String, usize)> {
     None
 }
 
-fn parse_variable_line(line: &str) -> Option<(String, String)> {
+fn parse_variable_line(line: &str) -> Option<(String, String, String)> {
     let trimmed = line.trim();
     if !trimmed.starts_with('(') {
         return None;
@@ -456,7 +526,7 @@ fn parse_variable_line(line: &str) -> Option<(String, String)> {
     }
 
     let value = format_variable_value(type_str, &raw_value);
-    Some((name, value))
+    Some((name, value, type_str.to_string()))
 }
 
 /// Format a variable value for the watch window based on its lldb type.
@@ -724,31 +794,41 @@ mod tests {
     #[test]
     fn parse_integer_variable() {
         let r = parse_variable_line("(long) x = 42");
-        assert_eq!(r, Some(("x".into(), "42".into())));
+        assert_eq!(r, Some(("x".into(), "42".into(), "long".into())));
     }
 
     #[test]
     fn parse_string_variable() {
         let r = parse_variable_line(r#"(char *) msg = 0x0000000100000acb "Hello""#);
-        assert_eq!(r, Some(("msg".into(), "'Hello'".into())));
+        assert_eq!(r, Some(("msg".into(), "'Hello'".into(), "char *".into())));
     }
 
     #[test]
     fn parse_double_variable() {
         let r = parse_variable_line("(double) r = 3.1400000000000001");
-        assert_eq!(r, Some(("r".into(), "3.14".into())));
+        assert_eq!(r, Some(("r".into(), "3.14".into(), "double".into())));
     }
 
     #[test]
     fn parse_pointer_variable() {
         let r = parse_variable_line("(long *) p = 0x0000600001234000");
-        assert_eq!(r, Some(("p".into(), "^0x0000600001234000".into())));
+        assert_eq!(r, Some(("p".into(), "^0x0000600001234000".into(), "long *".into())));
     }
 
     #[test]
     fn parse_null_pointer() {
         let r = parse_variable_line("(long *) p = 0x0000000000000000");
-        assert_eq!(r, Some(("p".into(), "nil".into())));
+        assert_eq!(r, Some(("p".into(), "nil".into(), "long *".into())));
+    }
+
+    #[test]
+    fn classify_basic_types() {
+        assert_eq!(classify_var_type("long"), VarType::Integer);
+        assert_eq!(classify_var_type("double"), VarType::Real);
+        assert_eq!(classify_var_type("bool"), VarType::Boolean);
+        assert_eq!(classify_var_type("char"), VarType::Char);
+        assert_eq!(classify_var_type("char *"), VarType::String);
+        assert_eq!(classify_var_type("MyEnum"), VarType::Other);
     }
 
     #[test]
