@@ -405,10 +405,16 @@ impl Debugger {
         let mut needs_var_request = false;
         let mut already_stopped = false;
 
+        let mut needs_continue = false;
+
         for line in lldb_lines {
             self.accumulated_lines.push(line.clone());
 
             if !already_stopped && line.contains("stop reason =") {
+                // Some lldb stops include the source in the same line as
+                // the "stop reason". Most don't — the `frame #0` line
+                // arrives separately right after. Try here first; the
+                // frame-#0 branch below handles the common case.
                 if let Some(loc) = self.parse_stop_location() {
                     self.state = DebugState::Paused {
                         file: loc.0.clone(),
@@ -440,6 +446,15 @@ impl Debugger {
                     needs_var_request = true;
                     self.pending_var_request = true;
                     already_stopped = true;
+                } else {
+                    // `frame #0:` arrived without an `at file:line` suffix —
+                    // we've stepped out of `main` into dyld's bootstrap
+                    // assembly (or another non-user frame). Auto-continue
+                    // so the program runs the rest of process teardown
+                    // and exits naturally; the "exited with status"
+                    // detector below catches the result.
+                    needs_continue = true;
+                    already_stopped = true;
                 }
             }
 
@@ -465,6 +480,10 @@ impl Debugger {
 
         if needs_var_request {
             let _ = self.send_command("frame variable");
+        }
+
+        if needs_continue {
+            let _ = self.send_command("continue");
         }
 
         events

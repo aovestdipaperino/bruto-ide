@@ -44,11 +44,15 @@ pub struct IdeOptions {
     /// Invoked exactly once, immediately after the first-run About dialog
     /// is dismissed, so the host can flip its persistent flag to false.
     pub on_about_shown: Option<Box<dyn FnMut()>>,
+    /// Body shown in the About dialog. The host should bake the application
+    /// name + version into this string. Falls back to a generic
+    /// "Bruto IDE" blurb when None.
+    pub about_text: Option<String>,
 }
 
 impl Default for IdeOptions {
     fn default() -> Self {
-        Self { show_about_on_start: false, on_about_shown: None }
+        Self { show_about_on_start: false, on_about_shown: None, about_text: None }
     }
 }
 
@@ -92,6 +96,9 @@ struct IdeState {
     /// Shared Output buffer — survives close/re-open so build / run history
     /// isn't lost.
     output_term: Rc<RefCell<TerminalWidget>>,
+    /// Host-supplied About dialog body, taken from IdeOptions at startup.
+    /// `None` means fall back to the generic Bruto IDE blurb.
+    about_text: Option<String>,
 }
 
 /// Wrap a fresh Watches `Window` around the shared [`WatchPanel`] and add it
@@ -205,6 +212,7 @@ pub fn run_with_options(
         output_win_id: None,
         watch: Rc::clone(&watch),
         output_term: Rc::clone(&output_term),
+        about_text: options.about_text.take(),
     };
 
     // ── Event loop ───────────────────────────────────────
@@ -224,7 +232,7 @@ pub fn run_with_options(
 
         if pending_about {
             pending_about = false;
-            show_about_dialog(&mut app, language.name());
+            show_about_dialog(&mut app, language.name(), ide.about_text.as_deref());
             if let Some(cb) = options.on_about_shown.as_mut() {
                 cb();
             }
@@ -260,6 +268,15 @@ pub fn run_with_options(
                     DebugEvent::Exited { code } => {
                         ide.exec_line = None;
                         ide.watch_vars.clear();
+                        // Clear the highlight on the editor that was being
+                        // debugged directly — the per-frame
+                        // `set_current_exec_line` call only updates the
+                        // *focused* editor, so if the user moved focus
+                        // (e.g. clicked the output panel) the bar would
+                        // otherwise linger after the program exits.
+                        if let Some(de) = ide.debug_editor.as_ref() {
+                            de.borrow_mut().set_current_exec_line(None);
+                        }
                         ide.debugger.stop();
                         ide.debug_editor = None;
                         ide.debug_synced_bps.clear();
@@ -482,7 +499,7 @@ fn handle_command(
         CM_DEBUG_STEP_OVER => { if ide.debugger.is_running() { let _ = ide.debugger.step_over(); } true }
         CM_DEBUG_STEP_INTO => { if ide.debugger.is_running() { let _ = ide.debugger.step_into(); } true }
         CM_ABOUT => {
-            show_about_dialog(app, language.name());
+            show_about_dialog(app, language.name(), ide.about_text.as_deref());
             true
         }
         _ => false,
@@ -1058,12 +1075,12 @@ fn chrono_now() -> String {
         .unwrap_or_else(|_| "unknown time".into())
 }
 
-fn show_about_dialog(app: &mut Application, language_name: &str) {
+fn show_about_dialog(app: &mut Application, language_name: &str, override_text: Option<&str>) {
     use turbo_vision::views::msgbox::message_box_ok;
-    message_box_ok(app, &format!(
-        "Bruto IDE\n\nVersion 0.1.0\n\nLanguage: {}\n\nBuilt with Turbo Vision for Rust\n\n(c) 2026 Enzo Lombardi",
-        language_name,
+    let body: String = override_text.map(str::to_string).unwrap_or_else(|| format!(
+        "Bruto IDE\n\nLanguage: {language_name}\n\n(c) 2026 Enzo Lombardi",
     ));
+    message_box_ok(app, &body);
 }
 
 fn centered_dialog_bounds(app: &Application) -> Rect {
