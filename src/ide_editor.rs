@@ -2,7 +2,6 @@
 ///
 /// Follows the same pattern as turbo-vision's EditWindow but adds the gutter
 /// as an interior child so that the gutter is visually part of the editor frame.
-
 use crate::commands::CM_CLOSE_EDITOR;
 use crate::gutter::{BreakpointGutter, GUTTER_WIDTH};
 use crate::ide_file_editor::IdeFileEditor;
@@ -14,7 +13,7 @@ use std::rc::Rc;
 use std::time::SystemTime;
 
 use turbo_vision::app::Application;
-use turbo_vision::core::command::{CommandId, CM_CLOSE};
+use turbo_vision::core::command::{CM_CLOSE, CommandId};
 use turbo_vision::core::draw::Cell;
 use turbo_vision::core::event::{Event, EventType};
 use turbo_vision::core::geometry::{Point, Rect};
@@ -23,7 +22,9 @@ use turbo_vision::core::palette_chain::PaletteChainNode;
 use turbo_vision::core::state::StateFlags;
 use turbo_vision::terminal::Terminal;
 use turbo_vision::views::editor::EditorWindow;
-use turbo_vision::views::editor_traits::{confirm_save_on_close, Editor, ExternalState, FileEditor};
+use turbo_vision::views::editor_traits::{
+    Editor, ExternalState, FileEditor, confirm_save_on_close,
+};
 use turbo_vision::views::file_dialog::FileDialogBuilder;
 use turbo_vision::views::indicator::Indicator;
 use turbo_vision::views::scrollbar::ScrollBar;
@@ -36,59 +37,133 @@ use turbo_vision::views::window::Window;
 struct SharedGutter(Rc<RefCell<BreakpointGutter>>);
 
 impl View for SharedGutter {
-    fn bounds(&self) -> Rect { self.0.borrow().bounds() }
-    fn set_bounds(&mut self, b: Rect) { self.0.borrow_mut().set_bounds(b); }
-    fn draw(&mut self, t: &mut Terminal) { self.0.borrow_mut().draw(t); }
-    fn handle_event(&mut self, e: &mut Event) { self.0.borrow_mut().handle_event(e); }
-    fn state(&self) -> StateFlags { self.0.borrow().state() }
-    fn set_state(&mut self, s: StateFlags) { self.0.borrow_mut().set_state(s); }
-    fn get_palette(&self) -> Option<Palette> { None }
-    fn set_palette_chain(&mut self, n: Option<PaletteChainNode>) { self.0.borrow_mut().set_palette_chain(n); }
-    fn get_palette_chain(&self) -> Option<&PaletteChainNode> { None }
+    fn bounds(&self) -> Rect {
+        self.0.borrow().bounds()
+    }
+    fn set_bounds(&mut self, b: Rect) {
+        self.0.borrow_mut().set_bounds(b);
+    }
+    fn draw(&mut self, t: &mut Terminal) {
+        self.0.borrow_mut().draw(t);
+    }
+    fn handle_event(&mut self, e: &mut Event) {
+        self.0.borrow_mut().handle_event(e);
+    }
+    fn state(&self) -> StateFlags {
+        self.0.borrow().state()
+    }
+    fn set_state(&mut self, s: StateFlags) {
+        self.0.borrow_mut().set_state(s);
+    }
+    fn get_palette(&self) -> Option<Palette> {
+        None
+    }
+    fn set_palette_chain(&mut self, n: Option<PaletteChainNode>) {
+        self.0.borrow_mut().set_palette_chain(n);
+    }
+    fn get_palette_chain(&self) -> Option<&PaletteChainNode> {
+        None
+    }
 }
 
 struct SharedEditor(Rc<RefCell<EditorWindow>>);
 
 impl View for SharedEditor {
-    fn bounds(&self) -> Rect { self.0.borrow().bounds() }
-    fn set_bounds(&mut self, b: Rect) { self.0.borrow_mut().set_bounds(b); }
-    fn draw(&mut self, t: &mut Terminal) { self.0.borrow_mut().draw(t); }
-    fn handle_event(&mut self, e: &mut Event) { self.0.borrow_mut().handle_event(e); }
-    fn can_focus(&self) -> bool { self.0.borrow().can_focus() }
-    fn set_focus(&mut self, f: bool) { self.0.borrow_mut().set_focus(f); }
-    fn is_focused(&self) -> bool { self.0.borrow().is_focused() }
-    fn options(&self) -> u16 { self.0.borrow().options() }
-    fn set_options(&mut self, o: u16) { self.0.borrow_mut().set_options(o); }
-    fn state(&self) -> StateFlags { self.0.borrow().state() }
-    fn set_state(&mut self, s: StateFlags) { self.0.borrow_mut().set_state(s); }
-    fn update_cursor(&self, t: &mut Terminal) { self.0.borrow().update_cursor(t); }
-    fn get_palette(&self) -> Option<Palette> { self.0.borrow().get_palette() }
-    fn set_palette_chain(&mut self, n: Option<PaletteChainNode>) { self.0.borrow_mut().set_palette_chain(n); }
-    fn get_palette_chain(&self) -> Option<&PaletteChainNode> { None }
+    fn bounds(&self) -> Rect {
+        self.0.borrow().bounds()
+    }
+    fn set_bounds(&mut self, b: Rect) {
+        self.0.borrow_mut().set_bounds(b);
+    }
+    fn draw(&mut self, t: &mut Terminal) {
+        self.0.borrow_mut().draw(t);
+    }
+    fn handle_event(&mut self, e: &mut Event) {
+        self.0.borrow_mut().handle_event(e);
+    }
+    fn can_focus(&self) -> bool {
+        self.0.borrow().can_focus()
+    }
+    fn set_focus(&mut self, f: bool) {
+        self.0.borrow_mut().set_focus(f);
+    }
+    fn is_focused(&self) -> bool {
+        self.0.borrow().is_focused()
+    }
+    fn options(&self) -> u16 {
+        self.0.borrow().options()
+    }
+    fn set_options(&mut self, o: u16) {
+        self.0.borrow_mut().set_options(o);
+    }
+    fn state(&self) -> StateFlags {
+        self.0.borrow().state()
+    }
+    fn set_state(&mut self, s: StateFlags) {
+        self.0.borrow_mut().set_state(s);
+    }
+    fn update_cursor(&self, t: &mut Terminal) {
+        self.0.borrow().update_cursor(t);
+    }
+    fn get_palette(&self) -> Option<Palette> {
+        self.0.borrow().get_palette()
+    }
+    fn set_palette_chain(&mut self, n: Option<PaletteChainNode>) {
+        self.0.borrow_mut().set_palette_chain(n);
+    }
+    fn get_palette_chain(&self) -> Option<&PaletteChainNode> {
+        None
+    }
 }
 
 struct SharedScrollBar(Rc<RefCell<ScrollBar>>);
 
 impl View for SharedScrollBar {
-    fn bounds(&self) -> Rect { self.0.borrow().bounds() }
-    fn set_bounds(&mut self, b: Rect) { self.0.borrow_mut().set_bounds(b); }
-    fn draw(&mut self, t: &mut Terminal) { self.0.borrow_mut().draw(t); }
-    fn handle_event(&mut self, e: &mut Event) { self.0.borrow_mut().handle_event(e); }
-    fn get_palette(&self) -> Option<Palette> { self.0.borrow().get_palette() }
-    fn set_palette_chain(&mut self, n: Option<PaletteChainNode>) { self.0.borrow_mut().set_palette_chain(n); }
-    fn get_palette_chain(&self) -> Option<&PaletteChainNode> { None }
+    fn bounds(&self) -> Rect {
+        self.0.borrow().bounds()
+    }
+    fn set_bounds(&mut self, b: Rect) {
+        self.0.borrow_mut().set_bounds(b);
+    }
+    fn draw(&mut self, t: &mut Terminal) {
+        self.0.borrow_mut().draw(t);
+    }
+    fn handle_event(&mut self, e: &mut Event) {
+        self.0.borrow_mut().handle_event(e);
+    }
+    fn get_palette(&self) -> Option<Palette> {
+        self.0.borrow().get_palette()
+    }
+    fn set_palette_chain(&mut self, n: Option<PaletteChainNode>) {
+        self.0.borrow_mut().set_palette_chain(n);
+    }
+    fn get_palette_chain(&self) -> Option<&PaletteChainNode> {
+        None
+    }
 }
 
 struct SharedIndicator(Rc<RefCell<Indicator>>);
 
 impl View for SharedIndicator {
-    fn bounds(&self) -> Rect { self.0.borrow().bounds() }
-    fn set_bounds(&mut self, b: Rect) { self.0.borrow_mut().set_bounds(b); }
-    fn draw(&mut self, t: &mut Terminal) { self.0.borrow_mut().draw(t); }
+    fn bounds(&self) -> Rect {
+        self.0.borrow().bounds()
+    }
+    fn set_bounds(&mut self, b: Rect) {
+        self.0.borrow_mut().set_bounds(b);
+    }
+    fn draw(&mut self, t: &mut Terminal) {
+        self.0.borrow_mut().draw(t);
+    }
     fn handle_event(&mut self, _e: &mut Event) {}
-    fn get_palette(&self) -> Option<Palette> { self.0.borrow().get_palette() }
-    fn set_palette_chain(&mut self, n: Option<PaletteChainNode>) { self.0.borrow_mut().set_palette_chain(n); }
-    fn get_palette_chain(&self) -> Option<&PaletteChainNode> { None }
+    fn get_palette(&self) -> Option<Palette> {
+        self.0.borrow().get_palette()
+    }
+    fn set_palette_chain(&mut self, n: Option<PaletteChainNode>) {
+        self.0.borrow_mut().set_palette_chain(n);
+    }
+    fn get_palette_chain(&self) -> Option<&PaletteChainNode> {
+        None
+    }
 }
 
 /// View wrapper that lets the same `IdeEditorWindow` be installed on the
@@ -99,22 +174,54 @@ impl View for SharedIndicator {
 pub struct SharedIdeEditorWindow(pub Rc<RefCell<IdeEditorWindow>>);
 
 impl View for SharedIdeEditorWindow {
-    fn bounds(&self) -> Rect { self.0.borrow().bounds() }
-    fn set_bounds(&mut self, b: Rect) { self.0.borrow_mut().set_bounds(b); }
-    fn draw(&mut self, t: &mut Terminal) { self.0.borrow_mut().draw(t); }
-    fn handle_event(&mut self, e: &mut Event) { self.0.borrow_mut().handle_event(e); }
-    fn can_focus(&self) -> bool { self.0.borrow().can_focus() }
-    fn set_focus(&mut self, f: bool) { self.0.borrow_mut().set_focus(f); }
-    fn is_focused(&self) -> bool { self.0.borrow().is_focused() }
-    fn options(&self) -> u16 { self.0.borrow().options() }
-    fn set_options(&mut self, o: u16) { self.0.borrow_mut().set_options(o); }
-    fn state(&self) -> StateFlags { self.0.borrow().state() }
-    fn set_state(&mut self, s: StateFlags) { self.0.borrow_mut().set_state(s); }
-    fn get_palette(&self) -> Option<Palette> { self.0.borrow().get_palette() }
-    fn set_palette_chain(&mut self, n: Option<PaletteChainNode>) { self.0.borrow_mut().set_palette_chain(n); }
-    fn get_palette_chain(&self) -> Option<&PaletteChainNode> { None }
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn bounds(&self) -> Rect {
+        self.0.borrow().bounds()
+    }
+    fn set_bounds(&mut self, b: Rect) {
+        self.0.borrow_mut().set_bounds(b);
+    }
+    fn draw(&mut self, t: &mut Terminal) {
+        self.0.borrow_mut().draw(t);
+    }
+    fn handle_event(&mut self, e: &mut Event) {
+        self.0.borrow_mut().handle_event(e);
+    }
+    fn can_focus(&self) -> bool {
+        self.0.borrow().can_focus()
+    }
+    fn set_focus(&mut self, f: bool) {
+        self.0.borrow_mut().set_focus(f);
+    }
+    fn is_focused(&self) -> bool {
+        self.0.borrow().is_focused()
+    }
+    fn options(&self) -> u16 {
+        self.0.borrow().options()
+    }
+    fn set_options(&mut self, o: u16) {
+        self.0.borrow_mut().set_options(o);
+    }
+    fn state(&self) -> StateFlags {
+        self.0.borrow().state()
+    }
+    fn set_state(&mut self, s: StateFlags) {
+        self.0.borrow_mut().set_state(s);
+    }
+    fn get_palette(&self) -> Option<Palette> {
+        self.0.borrow().get_palette()
+    }
+    fn set_palette_chain(&mut self, n: Option<PaletteChainNode>) {
+        self.0.borrow_mut().set_palette_chain(n);
+    }
+    fn get_palette_chain(&self) -> Option<&PaletteChainNode> {
+        None
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 // ── IdeEditorWindow ──────────────────────────────────────
@@ -190,9 +297,12 @@ impl IdeEditorWindow {
         window.add(Box::new(SharedEditor(Rc::clone(&editor))));
 
         // Add scrollbars + indicator as frame children
-        let h_scrollbar_idx = window.add_frame_child(Box::new(SharedScrollBar(Rc::clone(&h_scrollbar))));
-        let v_scrollbar_idx = window.add_frame_child(Box::new(SharedScrollBar(Rc::clone(&v_scrollbar))));
-        let indicator_idx = window.add_frame_child(Box::new(SharedIndicator(Rc::clone(&indicator))));
+        let h_scrollbar_idx =
+            window.add_frame_child(Box::new(SharedScrollBar(Rc::clone(&h_scrollbar))));
+        let v_scrollbar_idx =
+            window.add_frame_child(Box::new(SharedScrollBar(Rc::clone(&v_scrollbar))));
+        let indicator_idx =
+            window.add_frame_child(Box::new(SharedIndicator(Rc::clone(&indicator))));
 
         indicator.borrow_mut().set_value(Point::new(1, 1), false);
 
@@ -216,7 +326,9 @@ impl IdeEditorWindow {
         ide_win.window.set_focus(true);
         // Disable shadow — IDE windows are tiled, shadows waste space
         let state = ide_win.window.state();
-        ide_win.window.set_state(state & !turbo_vision::core::state::SF_SHADOW);
+        ide_win
+            .window
+            .set_state(state & !turbo_vision::core::state::SF_SHADOW);
         ide_win
     }
 
@@ -258,7 +370,9 @@ impl IdeEditorWindow {
     /// Sync the gutter scroll position with the editor's viewport offset.
     pub fn sync_gutter_scroll(&self) {
         let delta_y = self.editor.borrow().get_delta().y;
-        self.gutter.borrow_mut().set_top_line(delta_y.max(0) as usize);
+        self.gutter
+            .borrow_mut()
+            .set_top_line(delta_y.max(0) as usize);
     }
 
     /// Sync frame child positions after resize.
@@ -274,7 +388,8 @@ impl IdeEditorWindow {
                 bounds.a.x + win_w - 2,
                 bounds.a.y + win_h,
             );
-            self.window.update_frame_child(self.h_scrollbar_idx, h_bounds);
+            self.window
+                .update_frame_child(self.h_scrollbar_idx, h_bounds);
         }
 
         if win_w >= 3 && win_h >= 4 {
@@ -284,7 +399,8 @@ impl IdeEditorWindow {
                 bounds.a.x + win_w,
                 bounds.a.y + win_h - 2,
             );
-            self.window.update_frame_child(self.v_scrollbar_idx, v_bounds);
+            self.window
+                .update_frame_child(self.v_scrollbar_idx, v_bounds);
         }
 
         if win_h >= 3 {
@@ -294,14 +410,19 @@ impl IdeEditorWindow {
                 bounds.a.x + 16i16.min(win_w - 2),
                 bounds.a.y + win_h,
             );
-            self.window.update_frame_child(self.indicator_idx, ind_bounds);
+            self.window
+                .update_frame_child(self.indicator_idx, ind_bounds);
         }
     }
 }
 
 impl View for IdeEditorWindow {
-    fn bounds(&self) -> Rect { self.window.bounds() }
-    fn set_bounds(&mut self, bounds: Rect) { self.window.set_bounds(bounds); }
+    fn bounds(&self) -> Rect {
+        self.window.bounds()
+    }
+    fn set_bounds(&mut self, bounds: Rect) {
+        self.window.set_bounds(bounds);
+    }
 
     fn draw(&mut self, terminal: &mut Terminal) {
         self.sync_title_from_file_path();
@@ -429,7 +550,9 @@ impl View for IdeEditorWindow {
         }
     }
 
-    fn can_focus(&self) -> bool { true }
+    fn can_focus(&self) -> bool {
+        true
+    }
 
     fn set_focus(&mut self, focused: bool) {
         self.window.set_focus(focused);
@@ -438,25 +561,40 @@ impl View for IdeEditorWindow {
         // is_focused() to find the window to close, so we set the flag here
         // (state forwards to the inner window).
         let s = self.window.state();
-        self.window.set_state(
-            if focused { s | turbo_vision::core::state::SF_FOCUSED }
-            else { s & !turbo_vision::core::state::SF_FOCUSED },
-        );
+        self.window.set_state(if focused {
+            s | turbo_vision::core::state::SF_FOCUSED
+        } else {
+            s & !turbo_vision::core::state::SF_FOCUSED
+        });
     }
 
     fn is_focused(&self) -> bool {
         self.window.is_focused()
     }
 
-    fn options(&self) -> u16 { self.window.options() }
-    fn set_options(&mut self, o: u16) { self.window.set_options(o); }
-    fn state(&self) -> StateFlags { self.window.state() }
-    fn set_state(&mut self, s: StateFlags) { self.window.set_state(s); }
+    fn options(&self) -> u16 {
+        self.window.options()
+    }
+    fn set_options(&mut self, o: u16) {
+        self.window.set_options(o);
+    }
+    fn state(&self) -> StateFlags {
+        self.window.state()
+    }
+    fn set_state(&mut self, s: StateFlags) {
+        self.window.set_state(s);
+    }
 
-    fn get_palette(&self) -> Option<Palette> { self.window.get_palette() }
+    fn get_palette(&self) -> Option<Palette> {
+        self.window.get_palette()
+    }
 
-    fn set_palette_chain(&mut self, n: Option<PaletteChainNode>) { self.window.set_palette_chain(n); }
-    fn get_palette_chain(&self) -> Option<&PaletteChainNode> { self.window.get_palette_chain() }
+    fn set_palette_chain(&mut self, n: Option<PaletteChainNode>) {
+        self.window.set_palette_chain(n);
+    }
+    fn get_palette_chain(&self) -> Option<&PaletteChainNode> {
+        self.window.get_palette_chain()
+    }
 }
 
 // ── Trait impls ──────────────────────────────────────────
@@ -590,7 +728,9 @@ impl IdeFileEditor for IdeEditorWindow {
 
     fn snap_breakpoints(&mut self, valid_lines: &[usize], total_lines: usize) {
         let valid: HashSet<usize> = valid_lines.iter().copied().collect();
-        self.gutter.borrow_mut().snap_breakpoints(&valid, total_lines);
+        self.gutter
+            .borrow_mut()
+            .snap_breakpoints(&valid, total_lines);
     }
 
     fn current_exec_line(&self) -> Option<usize> {

@@ -3,7 +3,6 @@
 /// Displays breakpoint markers (red ■) and the current execution line (►).
 /// Mouse clicks toggle breakpoints. Does not paint its own background —
 /// the editor's window frame fills that area.
-
 use std::collections::HashSet;
 use turbo_vision::core::draw::Cell;
 use turbo_vision::core::event::{Event, EventType, MB_LEFT_BUTTON};
@@ -95,8 +94,12 @@ impl BreakpointGutter {
 }
 
 impl View for BreakpointGutter {
-    fn bounds(&self) -> Rect { self.bounds }
-    fn set_bounds(&mut self, bounds: Rect) { self.bounds = bounds; }
+    fn bounds(&self) -> Rect {
+        self.bounds
+    }
+    fn set_bounds(&mut self, bounds: Rect) {
+        self.bounds = bounds;
+    }
 
     fn draw(&mut self, terminal: &mut Terminal) {
         let height = self.bounds.height_clamped() as usize;
@@ -134,7 +137,13 @@ impl View for BreakpointGutter {
         }
     }
 
-    fn state(&self) -> StateFlags { self.state }
-    fn set_state(&mut self, state: StateFlags) { self.state = state; }
-    fn get_palette(&self) -> Option<turbo_vision::core::palette::Palette> { None }
+    fn state(&self) -> StateFlags {
+        self.state
+    }
+    fn set_state(&mut self, state: StateFlags) {
+        self.state = state;
+    }
+    fn get_palette(&self) -> Option<turbo_vision::core::palette::Palette> {
+        None
+    }
 }

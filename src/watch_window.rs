@@ -1,13 +1,12 @@
 /// Watch window — displays variable names and values during debugging.
 /// Renders like StaticText views inside a Dialog (gray palette).
-
 use turbo_vision::core::draw::DrawBuffer;
 use turbo_vision::core::event::{Event, EventType, MB_LEFT_BUTTON};
 use turbo_vision::core::geometry::Rect;
 use turbo_vision::core::palette::{Attr, TvColor};
 use turbo_vision::core::state::StateFlags;
 use turbo_vision::terminal::Terminal;
-use turbo_vision::views::view::{write_line_to_terminal, View};
+use turbo_vision::views::view::{View, write_line_to_terminal};
 
 use crate::debugger::VarType;
 
@@ -59,8 +58,12 @@ impl WatchPanel {
 }
 
 impl View for WatchPanel {
-    fn bounds(&self) -> Rect { self.bounds }
-    fn set_bounds(&mut self, bounds: Rect) { self.bounds = bounds; }
+    fn bounds(&self) -> Rect {
+        self.bounds
+    }
+    fn set_bounds(&mut self, bounds: Rect) {
+        self.bounds = bounds;
+    }
 
     fn draw(&mut self, terminal: &mut Terminal) {
         let width = self.bounds.width_clamped() as usize;
@@ -77,7 +80,12 @@ impl View for WatchPanel {
                 buf.move_str(name.len() + 3, value, VAL_ATTR);
             }
 
-            write_line_to_terminal(terminal, self.bounds.a.x, self.bounds.a.y + row as i16, &buf);
+            write_line_to_terminal(
+                terminal,
+                self.bounds.a.x,
+                self.bounds.a.y + row as i16,
+                &buf,
+            );
         }
     }
 
@@ -101,7 +109,13 @@ impl View for WatchPanel {
             }
         }
     }
-    fn state(&self) -> StateFlags { self.state }
-    fn set_state(&mut self, state: StateFlags) { self.state = state; }
-    fn get_palette(&self) -> Option<turbo_vision::core::palette::Palette> { None }
+    fn state(&self) -> StateFlags {
+        self.state
+    }
+    fn set_state(&mut self, state: StateFlags) {
+        self.state = state;
+    }
+    fn get_palette(&self) -> Option<turbo_vision::core::palette::Palette> {
+        None
+    }
 }

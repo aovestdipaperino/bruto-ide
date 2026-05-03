@@ -5,7 +5,6 @@
 ///
 /// Lives in `bruto-ide` (not in the language crate) so any language plugged
 /// into this IDE framework gets the value editor for free.
-
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -70,7 +69,9 @@ pub fn prompt_set_value(
     let result = dialog.execute(app);
     if result == CM_OK {
         let entered = data.borrow().clone();
-        if entered.is_empty() { return None; }
+        if entered.is_empty() {
+            return None;
+        }
         Some(entered)
     } else {
         None
@@ -82,7 +83,10 @@ pub fn prompt_set_value(
 /// every other type is shown verbatim.
 pub fn setter_initial_text(ty: VarType, current: &str) -> String {
     match ty {
-        VarType::Char => current.trim_start_matches('\'').trim_end_matches('\'').to_string(),
+        VarType::Char => current
+            .trim_start_matches('\'')
+            .trim_end_matches('\'')
+            .to_string(),
         _ => current.to_string(),
     }
 }
@@ -124,7 +128,9 @@ pub fn format_setter_expr(ty: VarType, raw: &str) -> Option<String> {
         VarType::Char => {
             let mut chars = trimmed.chars();
             let c = chars.next()?;
-            if chars.next().is_some() { return None; }
+            if chars.next().is_some() {
+                return None;
+            }
             let escaped: String = match c {
                 '\\' => "\\\\".to_string(),
                 '\'' => "\\'".to_string(),
@@ -142,8 +148,14 @@ mod tests {
 
     #[test]
     fn integer_setter_round_trips() {
-        assert_eq!(format_setter_expr(VarType::Integer, "42"), Some("42".into()));
-        assert_eq!(format_setter_expr(VarType::Integer, "-7"), Some("-7".into()));
+        assert_eq!(
+            format_setter_expr(VarType::Integer, "42"),
+            Some("42".into())
+        );
+        assert_eq!(
+            format_setter_expr(VarType::Integer, "-7"),
+            Some("-7".into())
+        );
         assert_eq!(format_setter_expr(VarType::Integer, "abc"), None);
     }
 
@@ -155,8 +167,14 @@ mod tests {
 
     #[test]
     fn boolean_setter_normalises() {
-        assert_eq!(format_setter_expr(VarType::Boolean, "TRUE"), Some("true".into()));
-        assert_eq!(format_setter_expr(VarType::Boolean, "0"), Some("false".into()));
+        assert_eq!(
+            format_setter_expr(VarType::Boolean, "TRUE"),
+            Some("true".into())
+        );
+        assert_eq!(
+            format_setter_expr(VarType::Boolean, "0"),
+            Some("false".into())
+        );
         assert_eq!(format_setter_expr(VarType::Boolean, "yes"), None);
     }
 

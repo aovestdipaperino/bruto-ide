@@ -3,13 +3,12 @@
 /// Program stdout is separated from lldb output by redirecting the debuggee's
 /// stdout to a temp file via `process launch --stdout`. A reader thread tails
 /// that file into a dedicated channel.
-
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read as IoRead, Seek, SeekFrom, Write as IoWrite};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::thread;
 
 #[derive(Debug, Clone)]
@@ -22,11 +21,16 @@ pub enum DebugState {
 
 #[derive(Debug, Clone)]
 pub enum DebugEvent {
-    Stopped { file: String, line: usize },
+    Stopped {
+        file: String,
+        line: usize,
+    },
     Variables(Vec<(String, String, VarType)>),
     /// Program output (from the debuggee's stdout, not lldb).
     ProgramOutput(String),
-    Exited { code: i32 },
+    Exited {
+        code: i32,
+    },
 }
 
 /// Coarse Pascal-flavoured classification of an lldb variable's type, used
@@ -77,9 +81,22 @@ pub fn classify_var_type(type_str: &str) -> VarType {
         return VarType::Real;
     }
     let int_types = [
-        "long", "unsigned long", "long long", "unsigned long long",
-        "int", "unsigned int", "short", "unsigned short", "i64", "i32",
-        "i16", "i8", "u64", "u32", "u16", "u8",
+        "long",
+        "unsigned long",
+        "long long",
+        "unsigned long long",
+        "int",
+        "unsigned int",
+        "short",
+        "unsigned short",
+        "i64",
+        "i32",
+        "i16",
+        "i8",
+        "u64",
+        "u32",
+        "u16",
+        "u8",
     ];
     if int_types.contains(&t) {
         return VarType::Integer;
@@ -93,11 +110,12 @@ const CONSOLE_FILE: &str = "/tmp/turbo_pascal_console.txt";
 /// Per-variable metadata loaded from `<exe>.bruto-meta`.
 #[derive(Debug, Clone)]
 pub enum VarMeta {
-    Enum(Vec<String>),                 // values in ordinal order
-    Set,                               // 4-word bitmask
-    VariantRecord {                    // tag + cases
+    Enum(Vec<String>), // values in ordinal order
+    Set,               // 4-word bitmask
+    VariantRecord {
+        // tag + cases
         tag_name: Option<String>,
-        fixed_fields: Vec<(String, String)>,    // (name, short type)
+        fixed_fields: Vec<(String, String)>, // (name, short type)
         cases: Vec<(Vec<i64>, Vec<(String, String)>)>,
     },
 }
@@ -143,10 +161,14 @@ impl Debugger {
     fn load_metadata(&mut self, exe_path: &str) {
         self.var_meta.clear();
         let path = format!("{exe_path}.bruto-meta");
-        let Ok(contents) = std::fs::read_to_string(&path) else { return; };
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            return;
+        };
         for line in contents.lines() {
             let parts: Vec<&str> = line.splitn(3, '|').collect();
-            if parts.len() < 2 { continue; }
+            if parts.len() < 2 {
+                continue;
+            }
             let name = parts[0].to_string();
             let kind = parts[1];
             let extra = parts.get(2).copied().unwrap_or("");
@@ -197,7 +219,11 @@ impl Debugger {
             let reader = BufReader::new(stdout);
             for line in reader.lines() {
                 match line {
-                    Ok(l) => { if lldb_tx.send(l).is_err() { break; } }
+                    Ok(l) => {
+                        if lldb_tx.send(l).is_err() {
+                            break;
+                        }
+                    }
                     Err(_) => break,
                 }
             }
@@ -240,7 +266,9 @@ impl Debugger {
 
                 let mut buf = vec![0u8; (file_len - pos) as usize];
                 let Ok(n) = file.read(&mut buf) else { continue };
-                if n == 0 { continue; }
+                if n == 0 {
+                    continue;
+                }
                 pos += n as u64;
 
                 let chunk = String::from_utf8_lossy(&buf[..n]);
@@ -249,7 +277,9 @@ impl Debugger {
                 while let Some(nl) = leftover.find('\n') {
                     let line = leftover[..nl].to_string();
                     leftover = leftover[nl + 1..].to_string();
-                    if prog_tx.send(line).is_err() { return; }
+                    if prog_tx.send(line).is_err() {
+                        return;
+                    }
                 }
             }
 
@@ -304,7 +334,9 @@ impl Debugger {
     fn send_command(&mut self, cmd: &str) -> Result<(), String> {
         if let Some(ref mut stdin) = self.stdin_tx {
             writeln!(stdin, "{cmd}").map_err(|e| format!("write to lldb: {e}"))?;
-            stdin.flush().map_err(|e| format!("flush lldb stdin: {e}"))?;
+            stdin
+                .flush()
+                .map_err(|e| format!("flush lldb stdin: {e}"))?;
             Ok(())
         } else {
             Err("lldb not running".into())
@@ -430,10 +462,7 @@ impl Debugger {
                 }
             }
 
-            if !already_stopped
-                && !line.contains("stop reason")
-                && line.contains("frame #0")
-            {
+            if !already_stopped && !line.contains("stop reason") && line.contains("frame #0") {
                 if let Some(loc) = parse_frame_location(&line) {
                     self.state = DebugState::Paused {
                         file: loc.0.clone(),
@@ -561,7 +590,11 @@ fn format_variable_value(type_str: &str, raw: &str) -> String {
             }
         }
         // Null pointer
-        if raw.trim() == "0x0000000000000000" || raw.trim() == "0x0" || raw.contains("nil") || raw.contains("NULL") {
+        if raw.trim() == "0x0000000000000000"
+            || raw.trim() == "0x0"
+            || raw.contains("nil")
+            || raw.contains("NULL")
+        {
             return "''".to_string();
         }
     }
@@ -569,7 +602,11 @@ fn format_variable_value(type_str: &str, raw: &str) -> String {
     // Pointer types: show address or nil
     if type_str.ends_with('*') && !type_str.contains("char") {
         let addr = raw.trim();
-        if addr == "0x0000000000000000" || addr == "0x0" || addr.contains("nil") || addr.contains("NULL") {
+        if addr == "0x0000000000000000"
+            || addr == "0x0"
+            || addr.contains("nil")
+            || addr.contains("NULL")
+        {
             return "nil".to_string();
         }
         return format!("^{raw}");
@@ -607,13 +644,18 @@ fn format_variable_value(type_str: &str, raw: &str) -> String {
     if type_str == "double" {
         // Trim trailing zeros for cleaner display
         if let Ok(f) = raw.parse::<f64>() {
-            return format!("{:.10}", f).trim_end_matches('0').trim_end_matches('.').to_string();
+            return format!("{:.10}", f)
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .to_string();
         }
     }
 
     // Sets: stored as [4 x long] / [4 x i64]. Decode the 256-bit bitmask
     // and display as Pascal set literal.
-    if (type_str == "long[4]" || type_str == "unsigned long[4]" || type_str == "i64[4]") && raw.starts_with('(') {
+    if (type_str == "long[4]" || type_str == "unsigned long[4]" || type_str == "i64[4]")
+        && raw.starts_with('(')
+    {
         if let Some(s) = decode_set_bitmask(raw) {
             return s;
         }
@@ -645,7 +687,9 @@ fn parse_vrec(body: &str) -> VarMeta {
     let mut fixed: Vec<(String, String)> = Vec::new();
     let mut cases: Vec<(Vec<i64>, Vec<(String, String)>)> = Vec::new();
     for part in body.split(';') {
-        if part.is_empty() { continue; }
+        if part.is_empty() {
+            continue;
+        }
         if let Some(rest) = part.strip_prefix("__tag=") {
             tag_name = Some(rest.to_string());
         } else if let Some(rest) = part.strip_prefix("__case[") {
@@ -654,17 +698,24 @@ fn parse_vrec(body: &str) -> VarMeta {
                 let vals_str = &rest[..end];
                 let fields_str = &rest[end + 2..];
                 let vals: Vec<i64> = vals_str.split(',').filter_map(|v| v.parse().ok()).collect();
-                let fs: Vec<(String, String)> = fields_str.split(',').filter_map(|f| {
-                    let (n, t) = f.split_once('=')?;
-                    Some((n.to_string(), t.to_string()))
-                }).collect();
+                let fs: Vec<(String, String)> = fields_str
+                    .split(',')
+                    .filter_map(|f| {
+                        let (n, t) = f.split_once('=')?;
+                        Some((n.to_string(), t.to_string()))
+                    })
+                    .collect();
                 cases.push((vals, fs));
             }
         } else if let Some((n, t)) = part.split_once('=') {
             fixed.push((n.to_string(), t.to_string()));
         }
     }
-    VarMeta::VariantRecord { tag_name, fixed_fields: fixed, cases }
+    VarMeta::VariantRecord {
+        tag_name,
+        fixed_fields: fixed,
+        cases,
+    }
 }
 
 /// Apply Pascal-aware formatting to an lldb-formatted value.
@@ -681,10 +732,16 @@ fn format_with_meta(meta: &VarMeta, raw: &str) -> Option<String> {
         }
         VarMeta::Set => {
             // raw might already be `[...]` from decode_set_bitmask, or a struct dump.
-            if raw.starts_with('[') { return Some(raw.to_string()); }
+            if raw.starts_with('[') {
+                return Some(raw.to_string());
+            }
             decode_set_bitmask(raw)
         }
-        VarMeta::VariantRecord { tag_name, fixed_fields, cases } => {
+        VarMeta::VariantRecord {
+            tag_name,
+            fixed_fields,
+            cases,
+        } => {
             // raw is a struct dump like `(kind = 1, tag = 1, _u = (...))`.
             // We extract tag value (if known), keep fixed fields, and surface
             // active variant fields.
@@ -727,13 +784,23 @@ fn split_top_level(inner: &str) -> Vec<String> {
     let mut depth = 0i32;
     for c in inner.chars() {
         match c {
-            '(' | '{' | '[' => { depth += 1; buf.push(c); }
-            ')' | '}' | ']' => { depth -= 1; buf.push(c); }
-            ',' if depth == 0 => { parts.push(std::mem::take(&mut buf)); }
+            '(' | '{' | '[' => {
+                depth += 1;
+                buf.push(c);
+            }
+            ')' | '}' | ']' => {
+                depth -= 1;
+                buf.push(c);
+            }
+            ',' if depth == 0 => {
+                parts.push(std::mem::take(&mut buf));
+            }
             _ => buf.push(c),
         }
     }
-    if !buf.is_empty() { parts.push(buf); }
+    if !buf.is_empty() {
+        parts.push(buf);
+    }
     parts
 }
 
@@ -761,7 +828,9 @@ fn decode_set_bitmask(raw: &str) -> Option<String> {
     // Decode into ordinals.
     let mut ordinals: Vec<u32> = Vec::new();
     for (i, &w) in words.iter().enumerate() {
-        if w == 0 { continue; }
+        if w == 0 {
+            continue;
+        }
         for b in 0..64u32 {
             if (w >> b) & 1 == 1 {
                 ordinals.push((i as u32) * 64 + b);
@@ -831,7 +900,10 @@ mod tests {
     #[test]
     fn parse_pointer_variable() {
         let r = parse_variable_line("(long *) p = 0x0000600001234000");
-        assert_eq!(r, Some(("p".into(), "^0x0000600001234000".into(), "long *".into())));
+        assert_eq!(
+            r,
+            Some(("p".into(), "^0x0000600001234000".into(), "long *".into()))
+        );
     }
 
     #[test]
@@ -852,7 +924,10 @@ mod tests {
 
     #[test]
     fn skip_internal_variable() {
-        assert_eq!(parse_variable_line("(void *) _capture = 0x0000000100000000"), None);
+        assert_eq!(
+            parse_variable_line("(void *) _capture = 0x0000000100000000"),
+            None
+        );
         assert_eq!(parse_variable_line("(long) _end_bp = 0"), None);
     }
 

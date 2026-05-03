@@ -5,14 +5,13 @@
 /// File→New / File→Open and removed when the user clicks the close button.
 /// All file operations route through the [`FileEditor`] trait on the
 /// focused editor, looked up dynamically via [`focused_editor`].
-
 use crate::commands::*;
 use crate::debugger::{DebugEvent, Debugger, VarType};
 use crate::ide_editor::{IdeEditorWindow, SharedIdeEditorWindow};
 use crate::ide_file_editor::IdeFileEditor;
-use bruto_lang::language::Language;
 use crate::output_panel::OutputPanel;
 use crate::watch_window::WatchPanel;
+use bruto_lang::language::Language;
 
 use std::cell::RefCell;
 use std::path::Path;
@@ -20,19 +19,21 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use turbo_vision::app::Application;
-use turbo_vision::core::command::{CM_CLOSE, CM_NEW, CM_NO, CM_OPEN, CM_QUIT, CM_SAVE, CM_SAVE_AS, CM_YES};
-use turbo_vision::core::state::SF_CLOSED;
+use turbo_vision::core::command::{
+    CM_CLOSE, CM_NEW, CM_NO, CM_OPEN, CM_QUIT, CM_SAVE, CM_SAVE_AS, CM_YES,
+};
 use turbo_vision::core::event::{Event, EventType, KB_F2, KB_F3, KB_F5, KB_F7, KB_F8, KB_F9};
 use turbo_vision::core::geometry::Rect;
 use turbo_vision::core::menu_data::{Menu, MenuItem};
 use turbo_vision::core::palette::{Attr, TvColor};
+use turbo_vision::core::state::SF_CLOSED;
+use turbo_vision::views::View;
 use turbo_vision::views::editor_traits::{ExternalState, FileEditor};
 use turbo_vision::views::file_dialog::FileDialogBuilder;
 use turbo_vision::views::menu_bar::{MenuBar, SubMenu};
-use turbo_vision::views::msgbox::{message_box, MF_YES_BUTTON, MF_NO_BUTTON, MF_CANCEL_BUTTON};
+use turbo_vision::views::msgbox::{MF_CANCEL_BUTTON, MF_NO_BUTTON, MF_YES_BUTTON, message_box};
 use turbo_vision::views::status_line::{StatusItem, StatusLine};
 use turbo_vision::views::terminal_widget::TerminalWidget;
-use turbo_vision::views::View;
 
 /// Host-application hooks that influence first-run behaviour. The IDE itself
 /// stays agnostic of any config file format — the host owns persistence and
@@ -128,7 +129,9 @@ fn install_watch_window(
     // would render off-screen.
     let interior_w = watch_bounds.width() - 2;
     let interior_h = watch_bounds.height() - 2;
-    watch.borrow_mut().set_bounds(Rect::new(0, 0, interior_w, interior_h));
+    watch
+        .borrow_mut()
+        .set_bounds(Rect::new(0, 0, interior_w, interior_h));
 
     let mut watch_win = turbo_vision::views::window::Window::new_with_type(
         watch_bounds,
@@ -193,17 +196,23 @@ pub fn run_with_options(
     let watch_bounds = Rect::new(editor_right, desktop_top, w, editor_bottom);
     let watch_interior_w = watch_bounds.width() - 2;
     let watch_interior_h = watch_bounds.height() - 2;
-    let watch = Rc::new(RefCell::new(WatchPanel::new(
-        Rect::new(0, 0, watch_interior_w, watch_interior_h),
-    )));
+    let watch = Rc::new(RefCell::new(WatchPanel::new(Rect::new(
+        0,
+        0,
+        watch_interior_w,
+        watch_interior_h,
+    ))));
 
     // ── Output buffer (hidden at start; survives close/re-open) ─────────
     let output_bounds = Rect::new(0, editor_bottom, w, desktop_bottom);
     let output_interior_w = output_bounds.width() - 2;
     let output_interior_h = output_bounds.height() - 2;
-    let output_term = Rc::new(RefCell::new(TerminalWidget::new(
-        Rect::new(0, 0, output_interior_w, output_interior_h),
-    )));
+    let output_term = Rc::new(RefCell::new(TerminalWidget::new(Rect::new(
+        0,
+        0,
+        output_interior_w,
+        output_interior_h,
+    ))));
 
     let mut ide = IdeState {
         debugger: Debugger::new(),
@@ -355,16 +364,28 @@ pub fn run_with_options(
                     match event.key_code {
                         // Menu items declare these as shortcuts but the menu bar only
                         // displays the labels; dispatch the commands ourselves.
-                        KB_F2 => { event = Event::command(CM_SAVE); }
-                        KB_F3 => { event = Event::command(CM_OPEN); }
-                        KB_F9 => { event = Event::command(CM_BUILD); }
-                        KB_F5 => { event = Event::command(CM_DEBUG_START); }
+                        KB_F2 => {
+                            event = Event::command(CM_SAVE);
+                        }
+                        KB_F3 => {
+                            event = Event::command(CM_OPEN);
+                        }
+                        KB_F9 => {
+                            event = Event::command(CM_BUILD);
+                        }
+                        KB_F5 => {
+                            event = Event::command(CM_DEBUG_START);
+                        }
                         KB_F7 => {
-                            if ide.debugger.is_running() { let _ = ide.debugger.step_into(); }
+                            if ide.debugger.is_running() {
+                                let _ = ide.debugger.step_into();
+                            }
                             event.clear();
                         }
                         KB_F8 => {
-                            if ide.debugger.is_running() { let _ = ide.debugger.step_over(); }
+                            if ide.debugger.is_running() {
+                                let _ = ide.debugger.step_over();
+                            }
                             event.clear();
                         }
                         _ => {}
@@ -372,10 +393,11 @@ pub fn run_with_options(
                 }
 
                 if event.what == EventType::Command {
-                    let handled = handle_command(
-                        event.command, &mut app, &language, &output_term, &mut ide,
-                    );
-                    if handled { event.clear(); }
+                    let handled =
+                        handle_command(event.command, &mut app, &language, &output_term, &mut ide);
+                    if handled {
+                        event.clear();
+                    }
                 }
 
                 app.desktop.handle_event(&mut event);
@@ -383,10 +405,11 @@ pub fn run_with_options(
                 // Frame-generated commands (e.g. CM_CLOSE from a close-button click)
                 // are produced during desktop dispatch, so re-run handle_command afterwards.
                 if event.what == EventType::Command {
-                    let handled = handle_command(
-                        event.command, &mut app, &language, &output_term, &mut ide,
-                    );
-                    if handled { event.clear(); }
+                    let handled =
+                        handle_command(event.command, &mut app, &language, &output_term, &mut ide);
+                    if handled {
+                        event.clear();
+                    }
                 }
 
                 // Sweep any windows that self-closed during dispatch (Window::auto_close).
@@ -398,10 +421,14 @@ pub fn run_with_options(
                 // still on the desktop. If not (user clicked their close button),
                 // forget the saved id so the Window menu re-enables their entries.
                 if let Some(id) = ide.watch_win_id {
-                    if !app.desktop.contains_id(id) { ide.watch_win_id = None; }
+                    if !app.desktop.contains_id(id) {
+                        ide.watch_win_id = None;
+                    }
                 }
                 if let Some(id) = ide.output_win_id {
-                    if !app.desktop.contains_id(id) { ide.output_win_id = None; }
+                    if !app.desktop.contains_id(id) {
+                        ide.output_win_id = None;
+                    }
                 }
 
                 // Did the user just double-click a watch row? Open the
@@ -471,7 +498,9 @@ fn handle_command(
         CM_SHOW_OUTPUT => {
             if ide.output_win_id.is_none() {
                 let panel = OutputPanel::with_terminal(
-                    ide.output_bounds, "Output", Rc::clone(&ide.output_term),
+                    ide.output_bounds,
+                    "Output",
+                    Rc::clone(&ide.output_term),
                 );
                 let id = app.desktop.add(Box::new(panel));
                 ide.output_win_id = Some(id);
@@ -511,11 +540,25 @@ fn handle_command(
             ide.watch_vars.clear();
             ide.debug_editor = None;
             ide.debug_synced_bps.clear();
-            append_output_line(&mut output_rc.borrow_mut(), "Debugger stopped.", Some(CONSOLE_INFO));
+            append_output_line(
+                &mut output_rc.borrow_mut(),
+                "Debugger stopped.",
+                Some(CONSOLE_INFO),
+            );
             true
         }
-        CM_DEBUG_STEP_OVER => { if ide.debugger.is_running() { let _ = ide.debugger.step_over(); } true }
-        CM_DEBUG_STEP_INTO => { if ide.debugger.is_running() { let _ = ide.debugger.step_into(); } true }
+        CM_DEBUG_STEP_OVER => {
+            if ide.debugger.is_running() {
+                let _ = ide.debugger.step_over();
+            }
+            true
+        }
+        CM_DEBUG_STEP_INTO => {
+            if ide.debugger.is_running() {
+                let _ = ide.debugger.step_into();
+            }
+            true
+        }
         CM_ABOUT => {
             show_about_dialog(app, language.name(), ide.about_text.as_deref());
             true
@@ -528,7 +571,8 @@ fn handle_command(
 
 /// Build a fresh `IdeEditorWindow` wired up with the language's highlighter.
 fn make_editor(language: &Box<dyn Language>, ide: &IdeState) -> Rc<RefCell<IdeEditorWindow>> {
-    let mut ide_win = IdeEditorWindow::new(ide.editor_bounds, &ide.untitled_title, &ide.save_wildcard);
+    let mut ide_win =
+        IdeEditorWindow::new(ide.editor_bounds, &ide.untitled_title, &ide.save_wildcard);
     ide_win.set_highlighter(language.create_highlighter());
     Rc::new(RefCell::new(ide_win))
 }
@@ -560,7 +604,9 @@ fn handle_open(app: &mut Application, language: &Box<dyn Language>, ide: &IdeSta
         .wildcard(ide.save_wildcard.clone())
         .button_label("~O~pen")
         .build();
-    let Some(path) = dialog.execute(app) else { return };
+    let Some(path) = dialog.execute(app) else {
+        return;
+    };
 
     // Already open? Focus that window instead of creating a duplicate.
     if let Some(idx) = find_editor_with_path(app, &path) {
@@ -580,7 +626,9 @@ fn handle_open(app: &mut Application, language: &Box<dyn Language>, ide: &IdeSta
 }
 
 fn handle_save(app: &mut Application, ide: &IdeState) {
-    let Some(editor) = focused_editor(app) else { return };
+    let Some(editor) = focused_editor(app) else {
+        return;
+    };
     let has_path = editor.borrow().file_path().is_some();
     if has_path {
         if let Err(e) = editor.borrow_mut().save() {
@@ -593,7 +641,9 @@ fn handle_save(app: &mut Application, ide: &IdeState) {
 }
 
 fn handle_save_as(app: &mut Application, ide: &IdeState) {
-    let Some(editor) = focused_editor(app) else { return };
+    let Some(editor) = focused_editor(app) else {
+        return;
+    };
     save_focused_as(app, &editor, ide);
 }
 
@@ -605,15 +655,14 @@ fn save_focused_as(app: &mut Application, editor: &Rc<RefCell<IdeEditorWindow>>,
         .wildcard(ide.save_wildcard.clone())
         .button_label("~S~ave")
         .build();
-    let Some(path) = dialog.execute(app) else { return };
+    let Some(path) = dialog.execute(app) else {
+        return;
+    };
 
     if path.exists() {
         use turbo_vision::views::msgbox::confirmation_box_yes_no;
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-        let answer = confirmation_box_yes_no(
-            app,
-            &format!("{name} already exists.\n\nOverwrite?"),
-        );
+        let answer = confirmation_box_yes_no(app, &format!("{name} already exists.\n\nOverwrite?"));
         if answer != CM_YES {
             return;
         }
@@ -634,7 +683,11 @@ fn handle_build(
     ide: &mut IdeState,
 ) {
     let Some(editor) = focused_editor(app) else {
-        append_output_line(output, "No active editor — open or create a file first.", Some(CONSOLE_INFO));
+        append_output_line(
+            output,
+            "No active editor — open or create a file first.",
+            Some(CONSOLE_INFO),
+        );
         return;
     };
     let source = editor.borrow().editor_rc().borrow().get_text();
@@ -646,7 +699,11 @@ fn handle_build(
             ide.exe_path = Some(result.exe_path.clone());
             ide.source_path = Some(result.source_path);
             ide.console_capture_path = Some(result.console_capture_path);
-            append_output_line(output, &format!("Build successful: {}", result.exe_path), Some(SUCCESS));
+            append_output_line(
+                output,
+                &format!("Build successful: {}", result.exe_path),
+                Some(SUCCESS),
+            );
         }
         Err(e) => {
             append_output_line(output, &format!("Build error: {}", e), Some(ERROR));
@@ -712,7 +769,10 @@ fn handle_debug_start_continue(
 
     // Snap breakpoints to valid executable lines
     let source = editor.borrow().editor_rc().borrow().get_text();
-    let valid: Vec<usize> = language.valid_breakpoint_lines(&source).into_iter().collect();
+    let valid: Vec<usize> = language
+        .valid_breakpoint_lines(&source)
+        .into_iter()
+        .collect();
     let line_count = source.lines().count();
     editor.borrow_mut().snap_breakpoints(&valid, line_count);
 
@@ -744,17 +804,21 @@ fn handle_debug_start_continue(
 /// add/remove deltas. No-op when the debugger isn't running or no editor
 /// is attached.
 fn sync_debug_breakpoints(ide: &mut IdeState) {
-    if !ide.debugger.is_running() { return; }
-    let Some(ref editor) = ide.debug_editor else { return };
+    if !ide.debugger.is_running() {
+        return;
+    }
+    let Some(ref editor) = ide.debug_editor else {
+        return;
+    };
 
     let desired: std::collections::HashSet<usize> =
         editor.borrow().breakpoint_lines().into_iter().collect();
-    if desired == ide.debug_synced_bps { return; }
+    if desired == ide.debug_synced_bps {
+        return;
+    }
 
-    let to_remove: Vec<usize> =
-        ide.debug_synced_bps.difference(&desired).copied().collect();
-    let to_add: Vec<usize> =
-        desired.difference(&ide.debug_synced_bps).copied().collect();
+    let to_remove: Vec<usize> = ide.debug_synced_bps.difference(&desired).copied().collect();
+    let to_add: Vec<usize> = desired.difference(&ide.debug_synced_bps).copied().collect();
 
     for line in &to_remove {
         let _ = ide.debugger.remove_breakpoint(*line);
@@ -788,7 +852,11 @@ fn update_command_states(app: &mut Application, ide: &IdeState) {
     let output_open = ide.output_win_id.is_some();
 
     let toggle = |cmd: u16, enabled: bool| {
-        if enabled { enable_command(cmd); } else { disable_command(cmd); }
+        if enabled {
+            enable_command(cmd);
+        } else {
+            disable_command(cmd);
+        }
     };
 
     // Editor-bound commands
@@ -833,10 +901,17 @@ fn focused_editor(app: &mut Application) -> Option<Rc<RefCell<IdeEditorWindow>>>
 fn find_editor_with_path(app: &mut Application, path: &Path) -> Option<usize> {
     let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     for i in 0..app.desktop.child_count() {
-        let Some(shared) = app.desktop.child_at(i).as_any().downcast_ref::<SharedIdeEditorWindow>() else {
+        let Some(shared) = app
+            .desktop
+            .child_at(i)
+            .as_any()
+            .downcast_ref::<SharedIdeEditorWindow>()
+        else {
             continue;
         };
-        let Some(existing) = shared.0.borrow().file_path() else { continue };
+        let Some(existing) = shared.0.borrow().file_path() else {
+            continue;
+        };
         let canonical = std::fs::canonicalize(&existing).unwrap_or(existing);
         if canonical == target {
             return Some(i);
@@ -853,7 +928,12 @@ fn poll_all_external_changes(app: &mut Application) {
     // Collect Rcs first so we don't mutate `app` while iterating it.
     let mut editors: Vec<Rc<RefCell<IdeEditorWindow>>> = Vec::new();
     for i in 0..app.desktop.child_count() {
-        if let Some(shared) = app.desktop.child_at(i).as_any().downcast_ref::<SharedIdeEditorWindow>() {
+        if let Some(shared) = app
+            .desktop
+            .child_at(i)
+            .as_any()
+            .downcast_ref::<SharedIdeEditorWindow>()
+        {
             editors.push(Rc::clone(&shared.0));
         }
     }
@@ -868,7 +948,9 @@ fn poll_all_external_changes(app: &mut Application) {
                     let _ = editor.borrow_mut().reload();
                 } else {
                     use turbo_vision::views::msgbox::confirmation_box_yes_no;
-                    let name = editor.borrow().file_path()
+                    let name = editor
+                        .borrow()
+                        .file_path()
                         .as_deref()
                         .and_then(|p| p.file_name())
                         .and_then(|n| n.to_str())
@@ -914,19 +996,25 @@ fn close_focused_window(app: &mut Application) {
 /// confirmation, stop the debugger so the close can proceed. Returns false
 /// when the user cancels (the close should be aborted).
 fn confirm_close_debug_editor(app: &mut Application, ide: &mut IdeState) -> bool {
-    let Some(editor) = focused_editor(app) else { return true };
+    let Some(editor) = focused_editor(app) else {
+        return true;
+    };
     let is_debug_target = match &ide.debug_editor {
         Some(de) => ide.debugger.is_running() && Rc::ptr_eq(de, &editor),
         None => false,
     };
-    if !is_debug_target { return true; }
+    if !is_debug_target {
+        return true;
+    }
 
     use turbo_vision::views::msgbox::confirmation_box_yes_no;
     let answer = confirmation_box_yes_no(
         app,
         "Closing this window will stop debugging.\n\nDo you want to close it?",
     );
-    if answer != CM_YES { return false; }
+    if answer != CM_YES {
+        return false;
+    }
 
     ide.debugger.stop();
     ide.exec_line = None;
@@ -939,10 +1027,16 @@ fn confirm_close_debug_editor(app: &mut Application, ide: &mut IdeState) -> bool
 /// If the focused editor is dirty, prompt save / discard / cancel. Returns true
 /// when it's safe to remove the window (saved or discarded).
 fn confirm_close_focused_editor(app: &mut Application) -> bool {
-    let Some(editor) = focused_editor(app) else { return true };
-    if !editor.borrow().is_dirty() { return true; }
+    let Some(editor) = focused_editor(app) else {
+        return true;
+    };
+    if !editor.borrow().is_dirty() {
+        return true;
+    }
 
-    let name = editor.borrow().file_path()
+    let name = editor
+        .borrow()
+        .file_path()
         .as_deref()
         .and_then(|p| p.file_name())
         .and_then(|n| n.to_str())
@@ -975,15 +1069,24 @@ fn confirm_close_all_dirty_editors(app: &mut Application) -> bool {
     // Snapshot editor Rcs first so prompts don't mutate the iteration.
     let mut editors: Vec<Rc<RefCell<IdeEditorWindow>>> = Vec::new();
     for i in 0..app.desktop.child_count() {
-        if let Some(shared) = app.desktop.child_at(i).as_any().downcast_ref::<SharedIdeEditorWindow>() {
+        if let Some(shared) = app
+            .desktop
+            .child_at(i)
+            .as_any()
+            .downcast_ref::<SharedIdeEditorWindow>()
+        {
             editors.push(Rc::clone(&shared.0));
         }
     }
 
     for editor in editors {
-        if !editor.borrow().is_dirty() { continue; }
+        if !editor.borrow().is_dirty() {
+            continue;
+        }
 
-        let name = editor.borrow().file_path()
+        let name = editor
+            .borrow()
+            .file_path()
             .as_deref()
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
@@ -1003,7 +1106,9 @@ fn confirm_close_all_dirty_editors(app: &mut Application) -> bool {
                 } else {
                     editor.borrow_mut().prompt_save_as(app)
                 };
-                if !saved { return false; }
+                if !saved {
+                    return false;
+                }
             }
             CM_NO => {}
             _ => return false,
@@ -1024,18 +1129,26 @@ fn handle_watch_edit(app: &mut Application, ide: &mut IdeState, row: usize) {
         .borrow()
         .variable_at(row)
         .map(|(n, v, t)| (n.clone(), v.clone(), *t));
-    let Some((name, current, ty)) = entry else { return };
+    let Some((name, current, ty)) = entry else {
+        return;
+    };
 
     if !ide.debugger.is_paused() {
-        message_box_ok(app, "The program must be paused at a breakpoint to set a value.");
+        message_box_ok(
+            app,
+            "The program must be paused at a breakpoint to set a value.",
+        );
         return;
     }
 
     if !ty.is_editable() {
-        message_box_ok(app, &format!(
-            "Variables of type {} are read-only in the watch window.",
-            ty.label(),
-        ));
+        message_box_ok(
+            app,
+            &format!(
+                "Variables of type {} are read-only in the watch window.",
+                ty.label(),
+            ),
+        );
         return;
     }
 
@@ -1043,10 +1156,10 @@ fn handle_watch_edit(app: &mut Application, ide: &mut IdeState, row: usize) {
         return;
     };
     let Some(expr_value) = crate::value_editor::format_setter_expr(ty, &new_value) else {
-        message_box_error(app, &format!(
-            "'{new_value}' is not a valid {} literal.",
-            ty.label(),
-        ));
+        message_box_error(
+            app,
+            &format!("'{new_value}' is not a valid {} literal.", ty.label(),),
+        );
         return;
     };
 
@@ -1095,9 +1208,9 @@ fn chrono_now() -> String {
 
 fn show_about_dialog(app: &mut Application, language_name: &str, override_text: Option<&str>) {
     use turbo_vision::views::msgbox::message_box_ok;
-    let body: String = override_text.map(str::to_string).unwrap_or_else(|| format!(
-        "Bruto IDE\n\nLanguage: {language_name}\n\n(c) 2026 Enzo Lombardi",
-    ));
+    let body: String = override_text.map(str::to_string).unwrap_or_else(|| {
+        format!("Bruto IDE\n\nLanguage: {language_name}\n\n(c) 2026 Enzo Lombardi",)
+    });
     message_box_ok(app, &body);
 }
 
@@ -1115,13 +1228,27 @@ fn centered_dialog_bounds(app: &Application) -> Rect {
 struct WatchView(Rc<RefCell<WatchPanel>>);
 
 impl View for WatchView {
-    fn bounds(&self) -> Rect { self.0.borrow().bounds() }
-    fn set_bounds(&mut self, b: Rect) { self.0.borrow_mut().set_bounds(b); }
-    fn draw(&mut self, t: &mut turbo_vision::terminal::Terminal) { self.0.borrow_mut().draw(t); }
-    fn handle_event(&mut self, e: &mut Event) { self.0.borrow_mut().handle_event(e); }
-    fn state(&self) -> turbo_vision::core::state::StateFlags { self.0.borrow().state() }
-    fn set_state(&mut self, s: turbo_vision::core::state::StateFlags) { self.0.borrow_mut().set_state(s); }
-    fn get_palette(&self) -> Option<turbo_vision::core::palette::Palette> { None }
+    fn bounds(&self) -> Rect {
+        self.0.borrow().bounds()
+    }
+    fn set_bounds(&mut self, b: Rect) {
+        self.0.borrow_mut().set_bounds(b);
+    }
+    fn draw(&mut self, t: &mut turbo_vision::terminal::Terminal) {
+        self.0.borrow_mut().draw(t);
+    }
+    fn handle_event(&mut self, e: &mut Event) {
+        self.0.borrow_mut().handle_event(e);
+    }
+    fn state(&self) -> turbo_vision::core::state::StateFlags {
+        self.0.borrow().state()
+    }
+    fn set_state(&mut self, s: turbo_vision::core::state::StateFlags) {
+        self.0.borrow_mut().set_state(s);
+    }
+    fn get_palette(&self) -> Option<turbo_vision::core::palette::Palette> {
+        None
+    }
 }
 
 // ── Menu and status bar ──────────────────────────────────
@@ -1150,9 +1277,13 @@ fn build_menu_bar(width: i16) -> MenuBar {
         MenuItem::with_shortcut("~W~atches", CM_SHOW_WATCHES, 0, "", 0),
         MenuItem::with_shortcut("~O~utput", CM_SHOW_OUTPUT, 0, "", 0),
     ]);
-    let about_menu = Menu::from_items(vec![
-        MenuItem::with_shortcut("~A~bout...", CM_ABOUT, 0, "", 0),
-    ]);
+    let about_menu = Menu::from_items(vec![MenuItem::with_shortcut(
+        "~A~bout...",
+        CM_ABOUT,
+        0,
+        "",
+        0,
+    )]);
 
     let mut menu_bar = MenuBar::new(Rect::new(0, 0, width, 1));
     menu_bar.add_submenu(SubMenu::new("~F~ile", file_menu));
