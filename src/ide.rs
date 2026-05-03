@@ -48,11 +48,22 @@ pub struct IdeOptions {
     /// name + version into this string. Falls back to a generic
     /// "Bruto IDE" blurb when None.
     pub about_text: Option<String>,
+    /// Invoked exactly once after the desktop has been drawn for the
+    /// first time and after the optional first-run About dialog has been
+    /// dismissed. The callback owns the `Application` so it can pop
+    /// modal dialogs (update prompts, license confirmations, etc.). The
+    /// framework knows nothing about its content.
+    pub on_desktop_ready: Option<Box<dyn FnOnce(&mut Application)>>,
 }
 
 impl Default for IdeOptions {
     fn default() -> Self {
-        Self { show_about_on_start: false, on_about_shown: None, about_text: None }
+        Self {
+            show_about_on_start: false,
+            on_about_shown: None,
+            about_text: None,
+            on_desktop_ready: None,
+        }
     }
 }
 
@@ -236,6 +247,13 @@ pub fn run_with_options(
             if let Some(cb) = options.on_about_shown.as_mut() {
                 cb();
             }
+        }
+
+        // Fire the desktop-ready hook on the first iteration that has a
+        // drawn frame. We move the closure out so it runs at most once
+        // even if the loop iterates many times.
+        if let Some(cb) = options.on_desktop_ready.take() {
+            cb(&mut app);
         }
 
         // Poll debugger
