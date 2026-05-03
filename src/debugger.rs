@@ -105,7 +105,11 @@ pub fn classify_var_type(type_str: &str) -> VarType {
 }
 
 /// The compiled program writes its output here via fprintf (see codegen.rs).
-const CONSOLE_FILE: &str = "/tmp/turbo_pascal_console.txt";
+/// Resolved via bruto_lang::target so /tmp on Unix and %TEMP% on Windows
+/// both work; the codegen embeds the same value into the program's IR.
+fn console_file() -> String {
+    bruto_lang::target::console_capture_path()
+}
 
 /// Per-variable metadata loaded from `<exe>.bruto-meta`.
 #[derive(Debug, Clone)]
@@ -196,7 +200,7 @@ impl Debugger {
         self.load_metadata(exe_path);
 
         // Truncate the console capture file (program writes here via fprintf)
-        let _ = std::fs::write(CONSOLE_FILE, "");
+        let _ = std::fs::write(console_file(), "");
 
         // Launch lldb — we only load the target, don't run yet
         let mut child = Command::new("lldb")
@@ -244,6 +248,7 @@ impl Debugger {
         // The compiled program writes here via fprintf (see codegen.rs).
         let (prog_tx, prog_rx) = mpsc::channel();
         let stop_flag = Arc::clone(&self.stop_flag);
+        let capture_path = console_file();
         thread::spawn(move || {
             let mut pos: u64 = 0;
             let mut leftover = String::new();
@@ -251,7 +256,7 @@ impl Debugger {
             while !stop_flag.load(Ordering::Relaxed) {
                 thread::sleep(std::time::Duration::from_millis(50));
 
-                let Ok(mut file) = std::fs::File::open(CONSOLE_FILE) else {
+                let Ok(mut file) = std::fs::File::open(&capture_path) else {
                     continue;
                 };
 
