@@ -11,7 +11,7 @@ use crate::ide_editor::{IdeEditorWindow, SharedIdeEditorWindow};
 use crate::ide_file_editor::IdeFileEditor;
 use crate::output_panel::OutputPanel;
 use crate::watch_window::WatchPanel;
-use bruto_lang::language::Language;
+use bruto_lang::language::{BuildPhase, BuildResult, Language};
 
 use std::cell::RefCell;
 use std::path::Path;
@@ -703,11 +703,13 @@ fn handle_build(
         return;
     };
     let source = editor.borrow().editor_rc().borrow().get_text();
+    let file_path = editor.borrow().file_path().map(std::path::PathBuf::from);
     output.clear();
     append_output_line(output, "Building...", Some(CONSOLE_INFO));
 
-    match language.build(&source) {
-        Ok(result) => {
+    let job = language.build_job_at(&source, file_path.as_deref());
+    match run_build_with_progress(app, job) {
+        Some(Ok(result)) => {
             ide.exe_path = Some(result.exe_path.clone());
             ide.source_path = Some(result.source_path);
             ide.console_capture_path = Some(result.console_capture_path);
@@ -717,9 +719,170 @@ fn handle_build(
                 Some(SUCCESS),
             );
         }
-        Err(e) => {
+        Some(Err(e)) => {
             append_output_line(output, &format!("Build error: {}", e), Some(ERROR));
         }
+        None => {
+            // User cancelled. Dropping the job already killed the linker
+            // child via PascalBuildJob::drop.
+            append_output_line(output, "Build cancelled.", Some(CONSOLE_INFO));
+        }
+    }
+}
+
+/// Run a [`BuildJob`] inside a centered modal dialog. Each tick draws
+/// the desktop / dialog, polls the job, and updates the visible phase
+/// label. Returns `Some(Ok|Err)` on completion or `None` when the user
+/// clicks Cancel — dropping the job kills any live child process.
+fn run_build_with_progress(
+    app: &mut Application,
+    mut job: Box<dyn bruto_lang::language::BuildJob>,
+) -> Option<Result<BuildResult, String>> {
+    use turbo_vision::core::command::CM_CANCEL;
+    use turbo_vision::core::state::SF_MODAL;
+    use turbo_vision::views::button::Button;
+    use turbo_vision::views::dialog::Dialog;
+
+    let (tw, th) = app.terminal.size();
+    let dw = 50i16.min(tw as i16 - 4);
+    let dh = 7i16;
+    let x = ((tw as i16) - dw) / 2;
+    let y = ((th as i16) - dh) / 2;
+    let bounds = Rect::new(x, y, x + dw, y + dh);
+
+    let mut dialog = Dialog::new(bounds, "Build");
+
+    let progress_text = Rc::new(RefCell::new("Compiling…".to_string()));
+    dialog.add(Box::new(ProgressView::new(
+        Rect::new(2, 2, dw - 2, 3),
+        Rc::clone(&progress_text),
+    )));
+
+    let cancel_w = 12i16;
+    let cancel_x = (dw - cancel_w) / 2;
+    dialog.add(Box::new(Button::new(
+        Rect::new(cancel_x, dh - 4, cancel_x + cancel_w, dh - 2),
+        "~C~ancel",
+        CM_CANCEL,
+        true,
+    )));
+
+    let old_state = dialog.state();
+    dialog.set_state(old_state | SF_MODAL);
+    dialog.set_initial_focus();
+
+    // Hide the terminal cursor for the duration so it doesn't blink in
+    // the editor underneath — the dialog has no focusable text input
+    // anyway, just the Cancel button.
+    let _ = app.terminal.hide_cursor();
+
+    let result = run_progress_loop(app, &mut dialog, &mut job, &progress_text);
+
+    // Show cursor again before we hand back to the main event loop;
+    // its update_cursor will reposition it to whatever's focused now.
+    let _ = app.terminal.show_cursor(0, 0);
+    result
+}
+
+fn run_progress_loop(
+    app: &mut Application,
+    dialog: &mut turbo_vision::views::dialog::Dialog,
+    job: &mut Box<dyn bruto_lang::language::BuildJob>,
+    progress_text: &Rc<RefCell<String>>,
+) -> Option<Result<BuildResult, String>> {
+    use turbo_vision::core::command::CM_CANCEL;
+    let _ = CM_CANCEL; // silence unused
+
+    loop {
+        // Force-clear the back buffer so the dialog overlay doesn't
+        // accidentally show a stale frame from before it opened.
+        app.terminal.force_full_redraw();
+
+        // Draw — desktop first (so the dialog overlays), then chrome,
+        // then the dialog itself.
+        app.desktop.draw(&mut app.terminal);
+        if let Some(ref mut mb) = app.menu_bar {
+            mb.draw(&mut app.terminal);
+        }
+        if let Some(ref mut sl) = app.status_line {
+            sl.draw(&mut app.terminal);
+        }
+        dialog.draw(&mut app.terminal);
+        let _ = app.terminal.flush();
+
+        // Advance the build by one step.
+        match job.poll() {
+            BuildPhase::Pending(label) => {
+                *progress_text.borrow_mut() = label;
+            }
+            BuildPhase::Done(r) => return Some(Ok(r)),
+            BuildPhase::Failed(e) => return Some(Err(e)),
+        }
+
+        // Poll the terminal briefly so Cancel feels responsive without
+        // starving the build (which we re-poll on the next iteration).
+        // Events route ONLY to the dialog — the desktop is purely
+        // visual while the modal is up.
+        if let Ok(Some(mut event)) = app.terminal.poll_event(Duration::from_millis(30)) {
+            dialog.handle_event(&mut event);
+            if event.what == EventType::Command {
+                dialog.handle_event(&mut event);
+            }
+            if dialog.get_end_state() != 0 {
+                // Clicked Cancel — let `job` drop and kill the linker.
+                return None;
+            }
+        }
+    }
+}
+
+/// One-line view used by the build progress dialog. Reads its text
+/// from a `Rc<RefCell<String>>` so the polling loop can update what's
+/// shown without rebuilding the dialog.
+struct ProgressView {
+    bounds: Rect,
+    state: turbo_vision::core::state::StateFlags,
+    text: Rc<RefCell<String>>,
+}
+
+impl ProgressView {
+    fn new(bounds: Rect, text: Rc<RefCell<String>>) -> Self {
+        Self {
+            bounds,
+            state: 0,
+            text,
+        }
+    }
+}
+
+impl turbo_vision::views::View for ProgressView {
+    fn bounds(&self) -> Rect {
+        self.bounds
+    }
+    fn set_bounds(&mut self, b: Rect) {
+        self.bounds = b;
+    }
+    fn draw(&mut self, terminal: &mut turbo_vision::terminal::Terminal) {
+        use turbo_vision::core::draw::DrawBuffer;
+        use turbo_vision::views::view::write_line_to_terminal;
+
+        let width = self.bounds.width_clamped() as usize;
+        let attr = self.map_color(1);
+        let mut buf = DrawBuffer::new(width);
+        buf.move_char(0, ' ', attr, width);
+        let txt = self.text.borrow();
+        buf.move_str(0, &txt, attr);
+        write_line_to_terminal(terminal, self.bounds.a.x, self.bounds.a.y, &buf);
+    }
+    fn handle_event(&mut self, _event: &mut Event) {}
+    fn state(&self) -> turbo_vision::core::state::StateFlags {
+        self.state
+    }
+    fn set_state(&mut self, s: turbo_vision::core::state::StateFlags) {
+        self.state = s;
+    }
+    fn get_palette(&self) -> Option<turbo_vision::core::palette::Palette> {
+        None
     }
 }
 

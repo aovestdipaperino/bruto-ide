@@ -747,34 +747,51 @@ fn format_with_meta(meta: &VarMeta, raw: &str) -> Option<String> {
             fixed_fields,
             cases,
         } => {
-            // raw is a struct dump like `(kind = 1, tag = 1, _u = (...))`.
-            // We extract tag value (if known), keep fixed fields, and surface
-            // active variant fields.
+            // raw is a struct dump like `(color = 7, kind = 1, radius = 10,
+            // width = 10, height = 5)` — every variant's fields appear because
+            // codegen emits them at overlapping offsets in DWARF. We pick the
+            // active variant by tag value and drop the rest.
             let inner = raw.trim().trim_start_matches('(').trim_end_matches(')');
-            let mut tag_value: Option<i64> = None;
-            let mut keep: Vec<String> = Vec::new();
-            // Naive top-level split honoring one level of parens.
             let entries = split_top_level(inner);
-            for entry in entries {
-                let trimmed = entry.trim();
-                if let Some((n, v)) = trimmed.split_once('=') {
-                    let fname = n.trim();
-                    let fval = v.trim();
-                    if Some(fname.to_string()) == *tag_name {
-                        tag_value = fval.parse().ok();
-                        keep.push(format!("{fname}={fval}"));
-                    } else if fixed_fields.iter().any(|(n, _)| n == fname) {
-                        keep.push(format!("{fname}={fval}"));
-                    }
-                    // Skip _u union dump
+            let mut field_values: Vec<(String, String)> = Vec::new();
+            for entry in &entries {
+                if let Some((n, v)) = entry.trim().split_once('=') {
+                    field_values.push((n.trim().to_string(), v.trim().to_string()));
                 }
             }
-            if let Some(tv) = tag_value {
-                if let Some((_, fields)) = cases.iter().find(|(vs, _)| vs.contains(&tv)) {
-                    keep.push(format!("[case {tv}: {} fields]", fields.len()));
-                    for (fname, _) in fields {
-                        keep.push(format!("(.{fname})"));
-                    }
+            let tag_value: Option<i64> = tag_name.as_ref().and_then(|tn| {
+                field_values
+                    .iter()
+                    .find(|(n, _)| n == tn)
+                    .and_then(|(_, v)| v.parse().ok())
+            });
+
+            let active_variant_fields: Vec<&str> = match tag_value
+                .and_then(|tv| cases.iter().find(|(vs, _)| vs.contains(&tv)))
+            {
+                Some((_, fs)) => fs.iter().map(|(n, _)| n.as_str()).collect(),
+                None => Vec::new(),
+            };
+
+            // Names of fields belonging to *some other* variant — we drop these
+            // from the watch output so the user only sees the active case.
+            let inactive_variant_fields: std::collections::HashSet<&str> = cases
+                .iter()
+                .flat_map(|(_, fs)| fs.iter().map(|(n, _)| n.as_str()))
+                .filter(|n| !active_variant_fields.contains(n))
+                .collect();
+
+            let mut keep: Vec<String> = Vec::new();
+            for (fname, fval) in &field_values {
+                if inactive_variant_fields.contains(fname.as_str()) {
+                    continue;
+                }
+                // Show fixed fields, the tag, and active-variant fields.
+                let is_fixed = fixed_fields.iter().any(|(n, _)| n == fname);
+                let is_tag = tag_name.as_ref().is_some_and(|t| t == fname);
+                let is_active = active_variant_fields.iter().any(|n| n == fname);
+                if is_fixed || is_tag || is_active {
+                    keep.push(format!("{fname}={fval}"));
                 }
             }
             Some(format!("({})", keep.join(", ")))
@@ -940,5 +957,49 @@ mod tests {
     fn parse_non_variable_line() {
         assert_eq!(parse_variable_line("Process 1234 stopped"), None);
         assert_eq!(parse_variable_line("(lldb) frame variable"), None);
+    }
+
+    #[test]
+    fn variant_record_filters_to_active_case() {
+        let meta = VarMeta::VariantRecord {
+            tag_name: Some("kind".into()),
+            fixed_fields: vec![("color".into(), "long".into())],
+            cases: vec![
+                (vec![0], vec![("radius".into(), "double".into())]),
+                (
+                    vec![1],
+                    vec![
+                        ("width".into(), "double".into()),
+                        ("height".into(), "double".into()),
+                    ],
+                ),
+            ],
+        };
+        // Tag = 1 → only color, kind, width, height should remain.
+        let raw = "(color = 7, kind = 1, radius = 10, width = 10, height = 5)";
+        let formatted = format_with_meta(&meta, raw).unwrap();
+        assert!(formatted.contains("color=7"));
+        assert!(formatted.contains("kind=1"));
+        assert!(formatted.contains("width=10"));
+        assert!(formatted.contains("height=5"));
+        assert!(!formatted.contains("radius"));
+    }
+
+    #[test]
+    fn variant_record_unknown_tag_drops_all_variant_fields() {
+        let meta = VarMeta::VariantRecord {
+            tag_name: Some("kind".into()),
+            fixed_fields: vec![("color".into(), "long".into())],
+            cases: vec![
+                (vec![0], vec![("radius".into(), "double".into())]),
+                (vec![1], vec![("width".into(), "double".into())]),
+            ],
+        };
+        let raw = "(color = 7, kind = 99, radius = 0, width = 0)";
+        let formatted = format_with_meta(&meta, raw).unwrap();
+        assert!(formatted.contains("color=7"));
+        assert!(formatted.contains("kind=99"));
+        assert!(!formatted.contains("radius"));
+        assert!(!formatted.contains("width"));
     }
 }
