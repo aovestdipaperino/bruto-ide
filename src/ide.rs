@@ -322,9 +322,21 @@ pub fn run_with_options(
         // (no-op when the debugger isn't active).
         sync_debug_breakpoints(&mut ide);
 
-        // Update watch and per-editor exec-line state
+        // Update watch and per-editor exec-line state.
         watch.borrow_mut().set_variables(ide.watch_vars.clone());
-        if let Some(ed) = focused_editor(&mut app) {
+
+        // Prefer the editor that's actually being debugged: the green
+        // exec-line bar must keep tracking the program counter even
+        // when focus has moved to the watch panel or output. Falling
+        // back to the focused editor keeps a leftover bar from
+        // sticking on an editor the user re-focuses outside a debug
+        // session.
+        let target = ide
+            .debug_editor
+            .as_ref()
+            .map(Rc::clone)
+            .or_else(|| focused_editor(&mut app));
+        if let Some(ed) = target {
             ed.borrow_mut().set_current_exec_line(ide.exec_line);
 
             if let Some(exec_line) = ide.exec_line {
