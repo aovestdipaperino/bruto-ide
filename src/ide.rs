@@ -5,6 +5,7 @@
 /// File→New / File→Open and removed when the user clicks the close button.
 /// All file operations route through the [`FileEditor`] trait on the
 /// focused editor, looked up dynamically via [`focused_editor`].
+use crate::callstack_window::CallStackPanel;
 use crate::commands::*;
 use crate::debugger::{DebugEvent, Debugger, VarType};
 use crate::ide_editor::{IdeEditorWindow, SharedIdeEditorWindow};
@@ -71,6 +72,15 @@ impl Default for IdeOptions {
 struct IdeState {
     debugger: Debugger,
     watch_vars: Vec<(String, String, VarType)>,
+    /// Frames produced by lldb's `bt` since the last stop. Pairs of
+    /// `(index, display)`; replaced by index when the same frame arrives
+    /// twice (lldb prints `frame #0` automatically on stop and again
+    /// inside `bt` output). Cleared on `Stopped` and `Exited`.
+    callstack_frames: Vec<(usize, String)>,
+    /// Frame index that should render with the green highlight in the
+    /// call-stack panel. `Some(0)` after every stop; updated to the
+    /// clicked frame's index when the user navigates via the panel.
+    current_frame_idx: Option<usize>,
     source_path: Option<String>,
     exe_path: Option<String>,
     console_capture_path: Option<String>,
@@ -81,6 +91,12 @@ struct IdeState {
     /// means switching focus to a sibling buffer mid-session doesn't
     /// confuse the breakpoint sync.
     debug_editor: Option<Rc<RefCell<IdeEditorWindow>>>,
+    /// Editor that currently owns the green "current statement" bar.
+    /// On a real stop this is `debug_editor`; clicking a call-stack frame
+    /// re-points it at the editor showing that frame's source so the bar
+    /// can land in a unit file when the frame isn't in the main program.
+    /// Cleared whenever the debug session ends.
+    exec_editor: Option<Rc<RefCell<IdeEditorWindow>>>,
     /// Cached set of breakpoint lines we last pushed into lldb. Compared
     /// each tick against `debug_editor`'s gutter so user clicks on the
     /// gutter while the process is running translate into
@@ -97,17 +113,23 @@ struct IdeState {
     watch_bounds: Rect,
     /// Layout used to (re-)spawn the Output panel.
     output_bounds: Rect,
+    /// Layout used to (re-)spawn the Call Stack window.
+    callstack_bounds: Rect,
     /// `Some(id)` while the Watches window is on the desktop. Cleared each tick
     /// when `Desktop::contains_id` reports the user closed it.
     watch_win_id: Option<turbo_vision::views::view::ViewId>,
     /// Same idea for the Output panel.
     output_win_id: Option<turbo_vision::views::view::ViewId>,
+    /// Same idea for the Call Stack window.
+    callstack_win_id: Option<turbo_vision::views::view::ViewId>,
     /// Shared Watches model — survives close/re-open so the variable list
     /// persists.
     watch: Rc<RefCell<WatchPanel>>,
     /// Shared Output buffer — survives close/re-open so build / run history
     /// isn't lost.
     output_term: Rc<RefCell<TerminalWidget>>,
+    /// Shared Call Stack model — survives close/re-open so frames persist.
+    callstack: Rc<RefCell<CallStackPanel>>,
     /// Host-supplied About dialog body, taken from IdeOptions at startup.
     /// `None` means fall back to the generic Bruto IDE blurb.
     about_text: Option<String>,
@@ -147,6 +169,33 @@ fn install_watch_window(
     app.desktop.add(Box::new(watch_win))
 }
 
+/// Wrap a fresh "Call Stack" `Window` around the shared [`CallStackPanel`] and
+/// add it to the desktop. Mirrors [`install_watch_window`].
+fn install_callstack_window(
+    app: &mut Application,
+    callstack_bounds: Rect,
+    callstack: &Rc<RefCell<CallStackPanel>>,
+) -> turbo_vision::views::view::ViewId {
+    let interior_w = callstack_bounds.width() - 2;
+    let interior_h = callstack_bounds.height() - 2;
+    callstack
+        .borrow_mut()
+        .set_bounds(Rect::new(0, 0, interior_w, interior_h));
+
+    let mut win = turbo_vision::views::window::Window::new_with_type(
+        callstack_bounds,
+        "Call Stack",
+        turbo_vision::views::window::WindowPaletteType::Gray,
+    );
+    win.add(Box::new(CallStackView(Rc::clone(callstack))));
+    {
+        use turbo_vision::core::state::SF_SHADOW;
+        let state = win.state();
+        win.set_state(state & !SF_SHADOW);
+    }
+    app.desktop.add(Box::new(win))
+}
+
 const OUTPUT_TEXT: Attr = Attr::new(TvColor::LightGray, TvColor::Black);
 const CONSOLE_INFO: Attr = Attr::new(TvColor::Yellow, TvColor::Black);
 const CONSOLE_ERR: Attr = Attr::new(TvColor::LightRed, TvColor::Black);
@@ -168,6 +217,8 @@ pub fn run_with_options(
     mut options: IdeOptions,
 ) -> turbo_vision::core::error::Result<()> {
     install_panic_log_hook();
+    crate::trace_log::init_for_session();
+    crate::trace_log!("ide startup; lang={}", language.name());
     let mut app = Application::new()?;
     let (width, height) = app.terminal.size();
     let w = width as i16;
@@ -214,24 +265,43 @@ pub fn run_with_options(
         output_interior_h,
     ))));
 
+    // ── Call Stack (hidden at start). Default bounds occupy the lower
+    // half of the watch column; user can drag/resize once shown.
+    let callstack_top = desktop_top + (editor_bottom - desktop_top) / 2;
+    let callstack_bounds = Rect::new(editor_right, callstack_top, w, editor_bottom);
+    let callstack_interior_w = callstack_bounds.width() - 2;
+    let callstack_interior_h = callstack_bounds.height() - 2;
+    let callstack = Rc::new(RefCell::new(CallStackPanel::new(Rect::new(
+        0,
+        0,
+        callstack_interior_w,
+        callstack_interior_h,
+    ))));
+
     let mut ide = IdeState {
         debugger: Debugger::new(),
         watch_vars: Vec::new(),
+        callstack_frames: Vec::new(),
+        current_frame_idx: None,
         source_path: None,
         exe_path: None,
         console_capture_path: None,
         exec_line: None,
         debug_editor: None,
+        exec_editor: None,
         debug_synced_bps: std::collections::HashSet::new(),
         editor_bounds,
         save_wildcard,
         untitled_title,
         watch_bounds,
         output_bounds,
+        callstack_bounds,
         watch_win_id: None,
         output_win_id: None,
+        callstack_win_id: None,
         watch: Rc::clone(&watch),
         output_term: Rc::clone(&output_term),
+        callstack: Rc::clone(&callstack),
         about_text: options.about_text.take(),
     };
 
@@ -272,6 +342,30 @@ pub fn run_with_options(
                 match dbg_event {
                     DebugEvent::Stopped { line, .. } => {
                         ide.exec_line = Some(line);
+                        // After a real stop the green bar belongs on the
+                        // debug target; clear any prior frame-click override.
+                        ide.exec_editor = ide.debug_editor.clone();
+                        // A new stop means the previous backtrace is stale;
+                        // wipe it so the panel doesn't briefly show the old
+                        // stack while `bt` output streams in.
+                        ide.callstack_frames.clear();
+                        // Frame #0 is the current PC after every stop; the
+                        // panel highlight resets to it until the user clicks
+                        // a different frame.
+                        ide.current_frame_idx = Some(0);
+                    }
+                    DebugEvent::Frames(frames) => {
+                        for (idx, display) in frames {
+                            match ide
+                                .callstack_frames
+                                .iter()
+                                .position(|(i, _)| *i == idx)
+                            {
+                                Some(pos) => ide.callstack_frames[pos] = (idx, display),
+                                None => ide.callstack_frames.push((idx, display)),
+                            }
+                        }
+                        ide.callstack_frames.sort_by_key(|(i, _)| *i);
                     }
                     DebugEvent::Variables(vars) => {
                         for (name, value, ty) in vars {
@@ -293,20 +387,33 @@ pub fn run_with_options(
                         append_output_line(&mut output_term.borrow_mut(), &line, None);
                     }
                     DebugEvent::Exited { code } => {
+                        crate::trace_log!("DebugEvent::Exited code={code}");
                         ide.exec_line = None;
                         ide.watch_vars.clear();
+                        ide.callstack_frames.clear();
+                        ide.current_frame_idx = None;
                         // Clear the highlight on the editor that was being
                         // debugged directly — the per-frame
                         // `set_current_exec_line` call only updates the
                         // *focused* editor, so if the user moved focus
                         // (e.g. clicked the output panel) the bar would
-                        // otherwise linger after the program exits.
+                        // otherwise linger after the program exits. Clear
+                        // any frame-click override target too, in case the
+                        // user jumped into a unit before the exit.
+                        if let Some(ee) = ide.exec_editor.as_ref() {
+                            ee.borrow_mut().set_current_exec_line(None);
+                        }
                         if let Some(de) = ide.debug_editor.as_ref() {
                             de.borrow_mut().set_current_exec_line(None);
                         }
+                        ide.exec_editor = None;
                         ide.debugger.stop();
                         ide.debug_editor = None;
                         ide.debug_synced_bps.clear();
+                        crate::trace_log!(
+                            "post-Exited cleanup done; debug_editor=None desktop_children={}",
+                            app.desktop.child_count()
+                        );
                         let color = if code == 0 { SUCCESS } else { ERROR };
                         append_output_line(
                             &mut output_term.borrow_mut(),
@@ -324,16 +431,23 @@ pub fn run_with_options(
 
         // Update watch and per-editor exec-line state.
         watch.borrow_mut().set_variables(ide.watch_vars.clone());
+        {
+            let mut cs = callstack.borrow_mut();
+            cs.set_frames(ide.callstack_frames.clone());
+            cs.set_current_idx(ide.current_frame_idx);
+        }
 
         // Prefer the editor that's actually being debugged: the green
         // exec-line bar must keep tracking the program counter even
         // when focus has moved to the watch panel or output. Falling
         // back to the focused editor keeps a leftover bar from
         // sticking on an editor the user re-focuses outside a debug
-        // session.
+        // session. `exec_editor` overrides the default while the user
+        // is exploring a non-#0 frame — see `handle_callstack_jump`.
         let target = ide
-            .debug_editor
+            .exec_editor
             .as_ref()
+            .or(ide.debug_editor.as_ref())
             .map(Rc::clone)
             .or_else(|| focused_editor(&mut app));
         if let Some(ed) = target {
@@ -442,6 +556,11 @@ pub fn run_with_options(
                         ide.output_win_id = None;
                     }
                 }
+                if let Some(id) = ide.callstack_win_id {
+                    if !app.desktop.contains_id(id) {
+                        ide.callstack_win_id = None;
+                    }
+                }
 
                 // Did the user just double-click a watch row? Open the
                 // type-aware value editor and push the result into lldb.
@@ -451,6 +570,11 @@ pub fn run_with_options(
                 let pending_watch_edit = watch.borrow_mut().take_pending_edit();
                 if let Some(row) = pending_watch_edit {
                     handle_watch_edit(&mut app, &mut ide, row);
+                }
+
+                let pending_jump = callstack.borrow_mut().take_pending_jump();
+                if let Some(row) = pending_jump {
+                    handle_callstack_jump(&mut app, &mut ide, row);
                 }
             }
             Ok(None) => {}
@@ -519,6 +643,13 @@ fn handle_command(
             }
             true
         }
+        CM_SHOW_CALLSTACK => {
+            if ide.callstack_win_id.is_none() {
+                let id = install_callstack_window(app, ide.callstack_bounds, &ide.callstack);
+                ide.callstack_win_id = Some(id);
+            }
+            true
+        }
         CM_OPEN => {
             handle_open(app, language, ide);
             true
@@ -547,9 +678,13 @@ fn handle_command(
             true
         }
         CM_DEBUG_STOP => {
+            crate::trace_log!("CM_DEBUG_STOP requested");
             ide.debugger.stop();
             ide.exec_line = None;
+            ide.exec_editor = None;
             ide.watch_vars.clear();
+            ide.callstack_frames.clear();
+            ide.current_frame_idx = None;
             ide.debug_editor = None;
             ide.debug_synced_bps.clear();
             append_output_line(
@@ -591,6 +726,10 @@ fn make_editor(language: &Box<dyn Language>, ide: &IdeState) -> Rc<RefCell<IdeEd
 
 /// Add an editor wrapper to the desktop and give it focus.
 fn install_editor(app: &mut Application, editor: Rc<RefCell<IdeEditorWindow>>) {
+    crate::trace_log!(
+        "install_editor: pre-add desktop_children={}",
+        app.desktop.child_count()
+    );
     let wrapper = SharedIdeEditorWindow(editor);
     app.desktop.add(Box::new(wrapper));
     // The newly added child is at the end; focus it via desktop's last index.
@@ -601,6 +740,10 @@ fn install_editor(app: &mut Application, editor: Rc<RefCell<IdeEditorWindow>>) {
             app.desktop.child_at_mut(i).set_focus(i == last);
         }
     }
+    crate::trace_log!(
+        "install_editor: post-add desktop_children={} focused_idx={last}",
+        app.desktop.child_count()
+    );
 }
 
 fn new_editor_window(app: &mut Application, language: &Box<dyn Language>, ide: &IdeState) {
@@ -609,6 +752,12 @@ fn new_editor_window(app: &mut Application, language: &Box<dyn Language>, ide: &
 }
 
 fn handle_open(app: &mut Application, language: &Box<dyn Language>, ide: &IdeState) {
+    crate::trace_log!(
+        "handle_open: enter; desktop_children={} debug_editor={} debugger_running={}",
+        app.desktop.child_count(),
+        ide.debug_editor.is_some(),
+        ide.debugger.is_running()
+    );
     let bounds = centered_dialog_bounds(app);
     let mut dialog = FileDialogBuilder::new()
         .bounds(bounds)
@@ -617,11 +766,14 @@ fn handle_open(app: &mut Application, language: &Box<dyn Language>, ide: &IdeSta
         .button_label("~O~pen")
         .build();
     let Some(path) = dialog.execute(app) else {
+        crate::trace_log!("handle_open: cancelled");
         return;
     };
+    crate::trace_log!("handle_open: selected {}", path.display());
 
     // Already open? Focus that window instead of creating a duplicate.
     if let Some(idx) = find_editor_with_path(app, &path) {
+        crate::trace_log!("handle_open: already open at idx {idx}; refocusing");
         for i in 0..app.desktop.child_count() {
             app.desktop.child_at_mut(i).set_focus(i == idx);
         }
@@ -630,11 +782,16 @@ fn handle_open(app: &mut Application, language: &Box<dyn Language>, ide: &IdeSta
 
     let editor = make_editor(language, ide);
     if let Err(e) = editor.borrow_mut().load(path.clone()) {
+        crate::trace_log!("handle_open: load failed: {e}");
         use turbo_vision::views::msgbox::message_box_error;
         message_box_error(app, &format!("Cannot open file:\n{e}"));
         return;
     }
     install_editor(app, editor);
+    crate::trace_log!(
+        "handle_open: installed; desktop_children={}",
+        app.desktop.child_count()
+    );
 }
 
 fn handle_save(app: &mut Application, ide: &IdeState) {
@@ -704,12 +861,20 @@ fn handle_build(
     };
     let source = editor.borrow().editor_rc().borrow().get_text();
     let file_path = editor.borrow().file_path().map(std::path::PathBuf::from);
+    crate::trace_log!(
+        "handle_build: src_len={} file_path={:?} debugger_running={} debug_editor_present={}",
+        source.len(),
+        file_path,
+        ide.debugger.is_running(),
+        ide.debug_editor.is_some()
+    );
     output.clear();
     append_output_line(output, "Building...", Some(CONSOLE_INFO));
 
     let job = language.build_job_at(&source, file_path.as_deref());
     match run_build_with_progress(app, job) {
         Some(Ok(result)) => {
+            crate::trace_log!("handle_build: ok exe={}", result.exe_path);
             ide.exe_path = Some(result.exe_path.clone());
             ide.source_path = Some(result.source_path);
             ide.console_capture_path = Some(result.console_capture_path);
@@ -720,11 +885,13 @@ fn handle_build(
             );
         }
         Some(Err(e)) => {
+            crate::trace_log!("handle_build: err {e}");
             append_output_line(output, &format!("Build error: {}", e), Some(ERROR));
         }
         None => {
             // User cancelled. Dropping the job already killed the linker
             // child via PascalBuildJob::drop.
+            crate::trace_log!("handle_build: cancelled");
             append_output_line(output, "Build cancelled.", Some(CONSOLE_INFO));
         }
     }
@@ -961,6 +1128,10 @@ fn handle_debug_start_continue(
     );
     output.clear();
 
+    crate::trace_log!(
+        "debugger.start: exe={exe_path} source={source_file} bps={}",
+        bp_lines.len()
+    );
     match ide.debugger.start(&exe_path, &source_file, &bp_lines) {
         Ok(()) => {
             // Remember which editor's breakpoints to mirror into lldb each
@@ -968,8 +1139,12 @@ fn handle_debug_start_continue(
             ide.debug_editor = Some(Rc::clone(&editor));
             ide.debug_synced_bps = bp_lines.iter().copied().collect();
             append_output_line(output, "Debugger started.", Some(SUCCESS));
+            crate::trace_log!("debugger.start: ok");
         }
-        Err(e) => append_output_line(output, &format!("Debugger error: {}", e), Some(ERROR)),
+        Err(e) => {
+            crate::trace_log!("debugger.start: err {e}");
+            append_output_line(output, &format!("Debugger error: {}", e), Some(ERROR));
+        }
     }
 }
 
@@ -1025,6 +1200,7 @@ fn update_command_states(app: &mut Application, ide: &IdeState) {
     let dbg_running = ide.debugger.is_running();
     let watch_open = ide.watch_win_id.is_some();
     let output_open = ide.output_win_id.is_some();
+    let callstack_open = ide.callstack_win_id.is_some();
 
     let toggle = |cmd: u16, enabled: bool| {
         if enabled {
@@ -1054,6 +1230,7 @@ fn update_command_states(app: &mut Application, ide: &IdeState) {
     // Window menu — only offer to re-open closed panels
     toggle(CM_SHOW_WATCHES, !watch_open);
     toggle(CM_SHOW_OUTPUT, !output_open);
+    toggle(CM_SHOW_CALLSTACK, !callstack_open);
 }
 
 /// Find the first child of the desktop that is both a `SharedIdeEditorWindow`
@@ -1157,6 +1334,7 @@ fn poll_all_external_changes(app: &mut Application) {
 /// Mark the currently-focused desktop window as closed and remove it.
 fn close_focused_window(app: &mut Application) {
     let count = app.desktop.child_count();
+    crate::trace_log!("close_focused_window: pre desktop_children={count}");
     for i in 0..count {
         if app.desktop.child_at(i).is_focused() {
             let state = app.desktop.child_at(i).state();
@@ -1165,6 +1343,10 @@ fn close_focused_window(app: &mut Application) {
         }
     }
     app.desktop.remove_closed_windows();
+    crate::trace_log!(
+        "close_focused_window: post desktop_children={}",
+        app.desktop.child_count()
+    );
 }
 
 /// If the focused editor is the active debug target, prompt the user; on
@@ -1193,7 +1375,10 @@ fn confirm_close_debug_editor(app: &mut Application, ide: &mut IdeState) -> bool
 
     ide.debugger.stop();
     ide.exec_line = None;
+    ide.exec_editor = None;
     ide.watch_vars.clear();
+    ide.callstack_frames.clear();
+    ide.current_frame_idx = None;
     ide.debug_editor = None;
     ide.debug_synced_bps.clear();
     true
@@ -1343,6 +1528,91 @@ fn handle_watch_edit(app: &mut Application, ide: &mut IdeState, row: usize) {
     }
 }
 
+/// Navigate the editor to the source location of the clicked call-stack frame
+/// and move the green "current statement" bar to that line. Frames whose
+/// display has no `at file:line` (e.g. dyld bootstrap) are silently
+/// ignored — there's no source to navigate to. The editor is matched by
+/// file basename, since lldb prints just the basename in `bt` output; if
+/// no editor is currently showing that file, the call falls back to the
+/// active `debug_editor` (we don't auto-open unit files for now).
+fn handle_callstack_jump(app: &mut Application, ide: &mut IdeState, row: usize) {
+    let frame = ide
+        .callstack
+        .borrow()
+        .frame_at(row)
+        .map(|(i, d)| (*i, d.clone()));
+    let Some((idx, display)) = frame else {
+        return;
+    };
+    let Some((file, line)) = crate::debugger::parse_frame_location(&display) else {
+        return;
+    };
+    let Some(editor) = jump_to_source_line(app, ide, &file, line) else {
+        return;
+    };
+    // If the previous bar was on a different editor, clear it there so two
+    // green bars don't linger when frames span multiple files.
+    if let Some(prev) = ide.exec_editor.as_ref() {
+        if !Rc::ptr_eq(prev, &editor) {
+            prev.borrow_mut().set_current_exec_line(None);
+        }
+    }
+    ide.exec_editor = Some(editor);
+    ide.exec_line = Some(line);
+    ide.current_frame_idx = Some(idx);
+}
+
+/// Find the desktop editor whose file path's basename matches `basename`,
+/// focus it, and scroll to (1-based) `line`. Returns the editor for the
+/// caller to wire up downstream state (e.g. the green-bar override).
+/// Falls back to `debug_editor` if no desktop editor matches.
+fn jump_to_source_line(
+    app: &mut Application,
+    ide: &IdeState,
+    basename: &str,
+    line: usize,
+) -> Option<Rc<RefCell<IdeEditorWindow>>> {
+    let mut target_idx: Option<usize> = None;
+    for i in 0..app.desktop.child_count() {
+        let Some(shared) = app
+            .desktop
+            .child_at(i)
+            .as_any()
+            .downcast_ref::<SharedIdeEditorWindow>()
+        else {
+            continue;
+        };
+        let Some(path) = shared.0.borrow().file_path() else {
+            continue;
+        };
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name == basename {
+            target_idx = Some(i);
+            break;
+        }
+    }
+
+    let editor = match target_idx {
+        Some(idx) => {
+            for i in 0..app.desktop.child_count() {
+                app.desktop.child_at_mut(i).set_focus(i == idx);
+            }
+            app.desktop
+                .child_at(idx)
+                .as_any()
+                .downcast_ref::<SharedIdeEditorWindow>()
+                .map(|s| Rc::clone(&s.0))?
+        }
+        None => Rc::clone(ide.debug_editor.as_ref()?),
+    };
+
+    let editor_inner = editor.borrow().editor_rc();
+    editor_inner.borrow_mut().scroll_to_line(line.saturating_sub(1));
+    Some(editor)
+}
+
 /// Install a process-wide panic hook that appends the panic message + a
 /// short backtrace to `/tmp/bruto-ide-panic.log` before chaining to the
 /// default hook. The IDE runs inside crossterm's alt-screen, so the
@@ -1426,6 +1696,32 @@ impl View for WatchView {
     }
 }
 
+struct CallStackView(Rc<RefCell<CallStackPanel>>);
+
+impl View for CallStackView {
+    fn bounds(&self) -> Rect {
+        self.0.borrow().bounds()
+    }
+    fn set_bounds(&mut self, b: Rect) {
+        self.0.borrow_mut().set_bounds(b);
+    }
+    fn draw(&mut self, t: &mut turbo_vision::terminal::Terminal) {
+        self.0.borrow_mut().draw(t);
+    }
+    fn handle_event(&mut self, e: &mut Event) {
+        self.0.borrow_mut().handle_event(e);
+    }
+    fn state(&self) -> turbo_vision::core::state::StateFlags {
+        self.0.borrow().state()
+    }
+    fn set_state(&mut self, s: turbo_vision::core::state::StateFlags) {
+        self.0.borrow_mut().set_state(s);
+    }
+    fn get_palette(&self) -> Option<turbo_vision::core::palette::Palette> {
+        None
+    }
+}
+
 // ── Menu and status bar ──────────────────────────────────
 
 fn build_menu_bar(width: i16) -> MenuBar {
@@ -1451,6 +1747,7 @@ fn build_menu_bar(width: i16) -> MenuBar {
     let window_menu = Menu::from_items(vec![
         MenuItem::with_shortcut("~W~atches", CM_SHOW_WATCHES, 0, "", 0),
         MenuItem::with_shortcut("~O~utput", CM_SHOW_OUTPUT, 0, "", 0),
+        MenuItem::with_shortcut("~C~all Stack", CM_SHOW_CALLSTACK, 0, "", 0),
     ]);
     let about_menu = Menu::from_items(vec![MenuItem::with_shortcut(
         "~A~bout...",

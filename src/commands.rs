@@ -54,3 +54,6 @@ pub const CM_SHOW_WATCHES: u16 = 441;
 
 /// Re-open the Output window (Window menu) after the user closed it.
 pub const CM_SHOW_OUTPUT: u16 = 442;
+
+/// Show / re-open the Call Stack window (hidden by default).
+pub const CM_SHOW_CALLSTACK: u16 = 443;

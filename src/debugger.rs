@@ -26,6 +26,11 @@ pub enum DebugEvent {
         line: usize,
     },
     Variables(Vec<(String, String, VarType)>),
+    /// One or more parsed `bt` frames. Each tuple is `(index, display)` where
+    /// `display` is everything after `frame #N: 0x... ` (function plus
+    /// optional `at file:line` suffix). Emitted incrementally as lldb's
+    /// backtrace output streams in; the IDE replaces frames by index.
+    Frames(Vec<(usize, String)>),
     /// Program output (from the debuggee's stdout, not lldb).
     ProgramOutput(String),
     Exited {
@@ -193,6 +198,11 @@ impl Debugger {
         source_file: &str,
         breakpoint_lines: &[usize],
     ) -> Result<(), String> {
+        crate::trace_log!(
+            "Debugger::start: exe={exe_path} source={source_file} bps={} prev_state={:?}",
+            breakpoint_lines.len(),
+            self.state
+        );
         self.source_file = source_file.to_string();
         self.accumulated_lines.clear();
         self.pending_var_request = false;
@@ -332,6 +342,7 @@ impl Debugger {
         // Run the program (output goes to capture file via compiled-in fprintf)
         self.send_command("run")?;
         self.state = DebugState::Running;
+        crate::trace_log!("Debugger::start: lldb run dispatched");
 
         Ok(())
     }
@@ -354,12 +365,18 @@ impl Debugger {
     }
 
     pub fn step_over(&mut self) -> Result<(), String> {
+        // Flip back to Running so poll() recognises the *next* stop reason
+        // as a fresh stop (otherwise `bt`'s response — which echoes the
+        // current thread's stop reason header — could re-trigger detection
+        // and pin exec_line to a stale frame).
+        self.state = DebugState::Running;
         self.send_command("next")?;
         self.pending_var_request = true;
         Ok(())
     }
 
     pub fn step_into(&mut self) -> Result<(), String> {
+        self.state = DebugState::Running;
         self.send_command("step")?;
         self.pending_var_request = true;
         Ok(())
@@ -398,6 +415,11 @@ impl Debugger {
     }
 
     pub fn stop(&mut self) {
+        crate::trace_log!(
+            "Debugger::stop: enter; was_running={} state={:?}",
+            self.process.is_some(),
+            self.state
+        );
         self.stop_flag.store(true, Ordering::Relaxed);
         if let Some(ref mut stdin) = self.stdin_tx {
             let _ = writeln!(stdin, "process kill");
@@ -418,6 +440,7 @@ impl Debugger {
         self.breakpoint_ids.clear();
         self.next_bp_id = 1;
         self.accumulated_lines.clear();
+        crate::trace_log!("Debugger::stop: done");
     }
 
     /// Poll for debugger events (non-blocking).
@@ -444,15 +467,23 @@ impl Debugger {
 
         let mut needs_continue = false;
 
+        // Snapshot at poll entry. `bt` (sent after every stop) echoes a
+        // `* thread #1 ... stop reason = ...` header followed by every
+        // frame in the stack — if we processed those as a fresh stop we
+        // would (a) loop infinitely sending `bt` again and (b) latch
+        // exec_line onto whichever caller frame appeared in the buffer.
+        // Once we've entered Paused, only continue/step (which flip back
+        // to Running) re-arm stop detection.
+        let was_running = matches!(self.state, DebugState::Running);
+
         for line in lldb_lines {
             self.accumulated_lines.push(line.clone());
 
-            if !already_stopped && line.contains("stop reason =") {
-                // Some lldb stops include the source in the same line as
-                // the "stop reason". Most don't — the `frame #0` line
-                // arrives separately right after. Try here first; the
-                // frame-#0 branch below handles the common case.
-                if let Some(loc) = self.parse_stop_location() {
+            if was_running && !already_stopped && line.contains("stop reason =") {
+                // Rare lldb stops fold the source into the stop-reason line
+                // itself ( `... stop reason = ... at file:line`). Common
+                // stops emit `frame #0` separately, handled below.
+                if let Some(loc) = parse_frame_location(&line) {
                     self.state = DebugState::Paused {
                         file: loc.0.clone(),
                         line: loc.1,
@@ -467,7 +498,11 @@ impl Debugger {
                 }
             }
 
-            if !already_stopped && !line.contains("stop reason") && line.contains("frame #0") {
+            if was_running
+                && !already_stopped
+                && !line.contains("stop reason")
+                && line.contains("frame #0")
+            {
                 if let Some(loc) = parse_frame_location(&line) {
                     self.state = DebugState::Paused {
                         file: loc.0.clone(),
@@ -505,6 +540,10 @@ impl Debugger {
                 }
             }
 
+            if let Some(frame) = parse_frame_line(&line) {
+                events.push(DebugEvent::Frames(vec![frame]));
+            }
+
             if line.contains("exited with status") {
                 let code = parse_exit_code(&line).unwrap_or(0);
                 self.state = DebugState::Exited { code };
@@ -514,6 +553,9 @@ impl Debugger {
 
         if needs_var_request {
             let _ = self.send_command("frame variable");
+            // Refresh the call-stack panel: `bt` prints `frame #0..N` which
+            // poll() parses into DebugEvent::Frames events on the next tick.
+            let _ = self.send_command("bt");
         }
 
         if needs_continue {
@@ -521,15 +563,6 @@ impl Debugger {
         }
 
         events
-    }
-
-    fn parse_stop_location(&self) -> Option<(String, usize)> {
-        for line in self.accumulated_lines.iter().rev().take(15) {
-            if let Some(loc) = parse_frame_location(line) {
-                return Some(loc);
-            }
-        }
-        None
     }
 
     pub fn is_running(&self) -> bool {
@@ -543,11 +576,36 @@ impl Debugger {
 
 impl Drop for Debugger {
     fn drop(&mut self) {
+        crate::trace_log!("Debugger::drop");
         self.stop();
     }
 }
 
-fn parse_frame_location(line: &str) -> Option<(String, usize)> {
+/// Parse a single `frame #N: <addr> <rest>` line from lldb's `bt` output.
+/// Strips the leading hex address so the display starts with the function
+/// name; only frames carrying a parseable ` at file:line` location are
+/// returned — bootstrap frames like `dyld\`start + 1234` are dropped here
+/// so they never reach the call-stack panel (clicking them would be a
+/// no-op and they have no source to land on).
+fn parse_frame_line(line: &str) -> Option<(usize, String)> {
+    let pos = line.find("frame #")?;
+    let rest = &line[pos + "frame #".len()..];
+    let colon = rest.find(':')?;
+    let index: usize = rest[..colon].trim().parse().ok()?;
+    let after_colon = rest[colon + 1..].trim();
+    let display = if after_colon.starts_with("0x") {
+        match after_colon.find(' ') {
+            Some(sp) => after_colon[sp + 1..].trim().to_string(),
+            None => after_colon.to_string(),
+        }
+    } else {
+        after_colon.to_string()
+    };
+    parse_frame_location(&display)?;
+    Some((index, display))
+}
+
+pub(crate) fn parse_frame_location(line: &str) -> Option<(String, usize)> {
     if let Some(at_pos) = line.find(" at ") {
         let rest = &line[at_pos + 4..];
         let parts: Vec<&str> = rest.split(':').collect();
@@ -951,6 +1009,28 @@ mod tests {
             None
         );
         assert_eq!(parse_variable_line("(long) _end_bp = 0"), None);
+    }
+
+    #[test]
+    fn parse_frame_line_user_code() {
+        let r = parse_frame_line(
+            "  * frame #0: 0x0000000100003f80 a.out`main at /tmp/test.pas:5",
+        );
+        assert_eq!(r, Some((0, "a.out`main at /tmp/test.pas:5".into())));
+    }
+
+    #[test]
+    fn parse_frame_line_drops_non_source_frames() {
+        // dyld bootstrap has no source location → filtered at the parser
+        // so the call-stack panel never shows non-actionable rows.
+        let r = parse_frame_line("    frame #1: 0x000000018c123abc dyld`start + 1234");
+        assert_eq!(r, None);
+    }
+
+    #[test]
+    fn parse_frame_line_rejects_non_frame() {
+        assert_eq!(parse_frame_line("Process 1234 stopped"), None);
+        assert_eq!(parse_frame_line("(lldb) bt"), None);
     }
 
     #[test]
