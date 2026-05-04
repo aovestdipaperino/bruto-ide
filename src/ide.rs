@@ -21,15 +21,18 @@ use std::time::Duration;
 
 use turbo_vision::app::Application;
 use turbo_vision::core::command::{
-    CM_CLOSE, CM_NEW, CM_NO, CM_OPEN, CM_QUIT, CM_SAVE, CM_SAVE_AS, CM_YES,
+    CM_CLOSE, CM_COPY, CM_CUT, CM_NEW, CM_NO, CM_OPEN, CM_PASTE, CM_QUIT, CM_REDO, CM_SAVE,
+    CM_SAVE_AS, CM_SELECT_ALL, CM_UNDO, CM_YES,
 };
-use turbo_vision::core::event::{Event, EventType, KB_F2, KB_F3, KB_F5, KB_F7, KB_F8, KB_F9};
+use turbo_vision::core::event::{
+    Event, EventType, KB_ALT_X, KB_F2, KB_F3, KB_F5, KB_F7, KB_F8, KB_F9,
+};
 use turbo_vision::core::geometry::Rect;
 use turbo_vision::core::menu_data::{Menu, MenuItem};
 use turbo_vision::core::palette::{Attr, TvColor};
 use turbo_vision::core::state::SF_CLOSED;
 use turbo_vision::views::View;
-use turbo_vision::views::editor_traits::{ExternalState, FileEditor};
+use turbo_vision::views::editor_traits::{Editor as _, ExternalState, FileEditor};
 use turbo_vision::views::file_dialog::FileDialogBuilder;
 use turbo_vision::views::menu_bar::{MenuBar, SubMenu};
 use turbo_vision::views::msgbox::{MF_CANCEL_BUTTON, MF_NO_BUTTON, MF_YES_BUTTON, message_box};
@@ -650,6 +653,42 @@ fn handle_command(
             }
             true
         }
+        CM_UNDO => {
+            if let Some(ed) = focused_editor(app) {
+                ed.borrow_mut().undo();
+            }
+            true
+        }
+        CM_REDO => {
+            if let Some(ed) = focused_editor(app) {
+                ed.borrow_mut().redo();
+            }
+            true
+        }
+        CM_CUT => {
+            if let Some(ed) = focused_editor(app) {
+                let _ = ed.borrow_mut().cut();
+            }
+            true
+        }
+        CM_COPY => {
+            if let Some(ed) = focused_editor(app) {
+                let _ = ed.borrow_mut().copy();
+            }
+            true
+        }
+        CM_PASTE => {
+            if let Some(ed) = focused_editor(app) {
+                let _ = ed.borrow_mut().paste();
+            }
+            true
+        }
+        CM_SELECT_ALL => {
+            if let Some(ed) = focused_editor(app) {
+                ed.borrow_mut().select_all();
+            }
+            true
+        }
         CM_OPEN => {
             handle_open(app, language, ide);
             true
@@ -1196,7 +1235,15 @@ fn sync_debug_breakpoints(ide: &mut IdeState) {
 fn update_command_states(app: &mut Application, ide: &IdeState) {
     use turbo_vision::core::command_set::{disable_command, enable_command};
 
-    let editor_focused = focused_editor(app).is_some();
+    let focused = focused_editor(app);
+    let editor_focused = focused.is_some();
+    let (has_selection, can_undo, can_redo) = match focused.as_ref() {
+        Some(e) => {
+            let b = e.borrow();
+            (b.has_selection(), b.can_undo(), b.can_redo())
+        }
+        None => (false, false, false),
+    };
     let dbg_running = ide.debugger.is_running();
     let watch_open = ide.watch_win_id.is_some();
     let output_open = ide.output_win_id.is_some();
@@ -1216,6 +1263,18 @@ fn update_command_states(app: &mut Application, ide: &IdeState) {
     toggle(CM_BUILD, editor_focused);
     toggle(CM_RUN, editor_focused);
     toggle(CM_CLOSE_EDITOR, editor_focused);
+
+    // Edit menu. Undo / Redo follow the focused editor's stack state so
+    // they grey out at the ends of the history (and on a clean buffer).
+    // Cut / Copy require a non-empty selection. Paste / Select All only
+    // need an editor; we don't peek at the OS clipboard each tick to
+    // avoid the per-frame arboard call.
+    toggle(CM_UNDO, can_undo);
+    toggle(CM_REDO, can_redo);
+    toggle(CM_PASTE, editor_focused);
+    toggle(CM_SELECT_ALL, editor_focused);
+    toggle(CM_CUT, editor_focused && has_selection);
+    toggle(CM_COPY, editor_focused && has_selection);
 
     // Debugger-bound commands.
     // CM_DEBUG_START is the same menu entry as continue (~S~tart / Continue);
@@ -1731,7 +1790,17 @@ fn build_menu_bar(width: i16) -> MenuBar {
         MenuItem::with_shortcut("~S~ave", CM_SAVE, KB_F2, "F2", 0),
         MenuItem::with_shortcut("Save ~A~s...", CM_SAVE_AS, 0, "", 0),
         MenuItem::separator(),
-        MenuItem::with_shortcut("E~x~it", CM_QUIT, 0x012D, "Alt-X", 0),
+        MenuItem::with_shortcut("E~x~it", CM_QUIT, KB_ALT_X, "Alt-X", 0),
+    ]);
+    let edit_menu = Menu::from_items(vec![
+        MenuItem::with_shortcut("~U~ndo", CM_UNDO, 0, "Ctrl-Z", 0),
+        MenuItem::with_shortcut("~R~edo", CM_REDO, 0, "Ctrl-Y", 0),
+        MenuItem::separator(),
+        MenuItem::with_shortcut("Cu~t~", CM_CUT, 0, "Ctrl-X", 0),
+        MenuItem::with_shortcut("~C~opy", CM_COPY, 0, "Ctrl-C", 0),
+        MenuItem::with_shortcut("~P~aste", CM_PASTE, 0, "Ctrl-V", 0),
+        MenuItem::separator(),
+        MenuItem::with_shortcut("Select ~A~ll", CM_SELECT_ALL, 0, "Ctrl-A", 0),
     ]);
     let build_menu = Menu::from_items(vec![
         MenuItem::with_shortcut("~B~uild", CM_BUILD, KB_F9, "F9", 0),
@@ -1759,6 +1828,7 @@ fn build_menu_bar(width: i16) -> MenuBar {
 
     let mut menu_bar = MenuBar::new(Rect::new(0, 0, width, 1));
     menu_bar.add_submenu(SubMenu::new("~F~ile", file_menu));
+    menu_bar.add_submenu(SubMenu::new("~E~dit", edit_menu));
     menu_bar.add_submenu(SubMenu::new("~B~uild", build_menu));
     menu_bar.add_submenu(SubMenu::new("~D~ebug", debug_menu));
     menu_bar.add_submenu(SubMenu::new("~W~indows", window_menu));
@@ -1774,7 +1844,7 @@ fn build_status_line(width: i16, height: i16) -> StatusLine {
             StatusItem::new("~F7~ Step", KB_F7, CM_DEBUG_STEP_INTO),
             StatusItem::new("~F8~ Next", KB_F8, CM_DEBUG_STEP_OVER),
             StatusItem::new("~F9~ Build", KB_F9, CM_BUILD),
-            StatusItem::new("~Alt-X~ Exit", 0x012D, CM_QUIT),
+            StatusItem::new("~Alt-X~ Exit", KB_ALT_X, CM_QUIT),
         ],
     )
 }
