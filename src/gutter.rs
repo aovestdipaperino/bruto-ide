@@ -114,6 +114,9 @@ impl View for BreakpointGutter {
             } else if self.current_exec_line == Some(line_num) {
                 terminal.write_cell(x, y, Cell::new('\u{25BA}', EXEC_ATTR));
             } else {
+                // Error lines paint their own red bar across the editor
+                // row in IdeEditorWindow.draw; the gutter stays clear so
+                // it remains exclusively a breakpoint surface.
                 terminal.write_cell(x, y, Cell::new(' ', GUTTER_BG));
             }
         }

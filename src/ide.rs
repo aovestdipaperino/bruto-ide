@@ -313,6 +313,7 @@ pub fn run_with_options(
     let mut pending_about = options.show_about_on_start;
     while app.running {
         update_command_states(&mut app, &ide);
+        update_status_hint(&mut app);
         app.terminal.force_full_redraw();
         app.desktop.draw(&mut app.terminal);
         if let Some(ref mut mb) = app.menu_bar {
@@ -910,6 +911,12 @@ fn handle_build(
     output.clear();
     append_output_line(output, "Building...", Some(CONSOLE_INFO));
 
+    // Drop any prior error highlight before we start; we'll re-set it
+    // below if this build fails too. Each build is the authoritative
+    // signal — leaving a stale red bar around after a successful build
+    // would mislead the user.
+    editor.borrow_mut().set_build_error(None);
+
     let job = language.build_job_at(&source, file_path.as_deref());
     match run_build_with_progress(app, job) {
         Some(Ok(result)) => {
@@ -925,7 +932,14 @@ fn handle_build(
         }
         Some(Err(e)) => {
             crate::trace_log!("handle_build: err {e}");
+            if let Some(line) = extract_error_line(&e) {
+                editor
+                    .borrow_mut()
+                    .set_build_error(Some((line, e.clone())));
+            }
             append_output_line(output, &format!("Build error: {}", e), Some(ERROR));
+            use turbo_vision::views::msgbox::message_box_error;
+            message_box_error(app, &e);
         }
         None => {
             // User cancelled. Dropping the job already killed the linker
@@ -934,6 +948,24 @@ fn handle_build(
             append_output_line(output, "Build cancelled.", Some(CONSOLE_INFO));
         }
     }
+}
+
+/// Pull a 1-based line number out of a build-error string. Pascal's
+/// parser emits `line N:col: message`; the linker / dsymutil errors
+/// don't have a line at all, in which case this returns `None` and the
+/// IDE just leaves the gutter clear.
+fn extract_error_line(error: &str) -> Option<usize> {
+    let pos = error.find("line ")?;
+    let rest = &error[pos + "line ".len()..];
+    let end = rest
+        .char_indices()
+        .find(|(_, c)| !c.is_ascii_digit())
+        .map(|(i, _)| i)
+        .unwrap_or(rest.len());
+    if end == 0 {
+        return None;
+    }
+    rest[..end].parse().ok()
 }
 
 /// Run a [`BuildJob`] inside a centered modal dialog. Each tick draws
@@ -1290,6 +1322,38 @@ fn update_command_states(app: &mut Application, ide: &IdeState) {
     toggle(CM_SHOW_WATCHES, !watch_open);
     toggle(CM_SHOW_OUTPUT, !output_open);
     toggle(CM_SHOW_CALLSTACK, !callstack_open);
+}
+
+/// Show the latest build error in the status line whenever the caret
+/// sits on the offending line of the focused editor; clear the hint
+/// otherwise. Whitespace is flattened to fit on a single status row,
+/// and the noisy `Parse error: line ` prefix from the build job is
+/// stripped — the user already knows it's an error and what line
+/// they're on, so a compact `<col>: <message>` is more useful.
+fn update_status_hint(app: &mut Application) {
+    let hint = focused_editor(app).and_then(|ed| {
+        let edw = ed.borrow();
+        let (err_line, message) = edw.build_error()?;
+        let cursor_line = edw.editor_rc().borrow().cursor().y as usize + 1;
+        if cursor_line != err_line {
+            return None;
+        }
+        let flat = message.split_whitespace().collect::<Vec<_>>().join(" ");
+        Some(format_status_error(&flat))
+    });
+    if let Some(ref mut sl) = app.status_line {
+        sl.set_hint(hint);
+    }
+}
+
+/// Strip the `Parse error: line ` (or just `line `) prefix from a build
+/// error so the status hint shows the bare `<line>:<col>: <message>`.
+/// Anything that doesn't carry the `line ` marker is returned as-is.
+fn format_status_error(message: &str) -> String {
+    match message.find("line ") {
+        Some(i) => message[i + "line ".len()..].to_string(),
+        None => message.to_string(),
+    }
 }
 
 /// Find the first child of the desktop that is both a `SharedIdeEditorWindow`
@@ -1847,4 +1911,55 @@ fn build_status_line(width: i16, height: i16) -> StatusLine {
             StatusItem::new("~Alt-X~ Exit", KB_ALT_X, CM_QUIT),
         ],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_error_line, format_status_error};
+
+    #[test]
+    fn status_strips_parse_error_prefix() {
+        assert_eq!(
+            format_status_error("Parse error: line 6:1: expected ';', found 'var'"),
+            "6:1: expected ';', found 'var'"
+        );
+    }
+
+    #[test]
+    fn status_strips_bare_line_prefix() {
+        assert_eq!(
+            format_status_error("line 12:5: unexpected token: BEGIN"),
+            "12:5: unexpected token: BEGIN"
+        );
+    }
+
+    #[test]
+    fn status_passes_through_message_without_line_marker() {
+        assert_eq!(
+            format_status_error("ld: framework not found"),
+            "ld: framework not found"
+        );
+    }
+
+    #[test]
+    fn extracts_pascal_parser_line() {
+        assert_eq!(
+            extract_error_line("line 12:5: unexpected token: BEGIN"),
+            Some(12)
+        );
+    }
+
+    #[test]
+    fn extracts_when_prefixed_with_filename() {
+        assert_eq!(
+            extract_error_line("demo.pas: line 7:1: missing semicolon"),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn returns_none_when_no_line_in_message() {
+        assert_eq!(extract_error_line("ld: framework not found"), None);
+        assert_eq!(extract_error_line("line abc: bogus"), None);
+    }
 }

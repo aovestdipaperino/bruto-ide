@@ -252,6 +252,11 @@ pub struct IdeEditorWindow {
     h_scrollbar_idx: usize,
     v_scrollbar_idx: usize,
     indicator_idx: usize,
+    /// Last build error tied to this buffer: 1-based line + message
+    /// extracted from the compiler diagnostic. The line drives the red
+    /// row overlay; the message is surfaced in the status bar when the
+    /// caret sits on that line. Cleared at the start of every build.
+    build_error: RefCell<Option<(usize, String)>>,
 }
 
 impl IdeEditorWindow {
@@ -321,6 +326,7 @@ impl IdeEditorWindow {
             h_scrollbar_idx,
             v_scrollbar_idx,
             indicator_idx,
+            build_error: RefCell::new(None),
         };
 
         ide_win.window.set_focus(true);
@@ -429,6 +435,45 @@ impl View for IdeEditorWindow {
         self.sync_frame_children_positions();
         self.sync_gutter_scroll();
         self.window.draw(terminal);
+
+        // Overlay error-line highlight FIRST, so a debugger exec line on
+        // the same row paints over it (the program counter is more
+        // immediately relevant than a stale build error).
+        let error_line = self.build_error.borrow().as_ref().map(|(l, _)| *l);
+        if let Some(error_line) = error_line {
+            let scroll_y = self.editor.borrow().get_delta().y.max(0) as usize;
+            if error_line > scroll_y {
+                let visible_row = (error_line - scroll_y - 1) as i16;
+                let bounds = self.window.bounds();
+                let interior_h = bounds.height() - 2;
+                if visible_row >= 0 && visible_row < interior_h {
+                    let highlight_bg = TvColor::Red;
+                    let gutter_x = bounds.a.x + 1;
+                    let row_y = bounds.a.y + 1 + visible_row;
+                    for col in 0..GUTTER_WIDTH {
+                        let x = gutter_x + col;
+                        if let Some(existing) = terminal.read_cell(x, row_y) {
+                            terminal.write_cell(
+                                x as u16,
+                                row_y as u16,
+                                Cell::new(existing.ch, Attr::new(existing.attr.fg, highlight_bg)),
+                            );
+                        }
+                    }
+                    let editor_x = gutter_x + GUTTER_WIDTH;
+                    let editor_end = bounds.b.x - 1;
+                    for x in editor_x..editor_end {
+                        if let Some(existing) = terminal.read_cell(x, row_y) {
+                            terminal.write_cell(
+                                x as u16,
+                                row_y as u16,
+                                Cell::new(existing.ch, Attr::new(existing.attr.fg, highlight_bg)),
+                            );
+                        }
+                    }
+                }
+            }
+        }
 
         // Overlay execution line highlight on top of the editor area.
         // The gutter already shows ► but we also paint the entire line's
@@ -779,6 +824,14 @@ impl IdeFileEditor for IdeEditorWindow {
 
     fn set_current_exec_line(&mut self, line: Option<usize>) {
         self.gutter.borrow_mut().set_current_exec_line(line);
+    }
+
+    fn build_error(&self) -> Option<(usize, String)> {
+        self.build_error.borrow().clone()
+    }
+
+    fn set_build_error(&mut self, err: Option<(usize, String)>) {
+        *self.build_error.borrow_mut() = err;
     }
 }
 
