@@ -47,6 +47,8 @@ pub struct Debugger {
     next_bp_id: u32,
     pending_var_request: bool,
     accumulated_lines: Vec<String>,
+    /// Set when "stop reason" is seen; cleared when the frame line arrives.
+    awaiting_frame_location: bool,
 }
 
 impl Debugger {
@@ -63,6 +65,7 @@ impl Debugger {
             next_bp_id: 1,
             pending_var_request: false,
             accumulated_lines: Vec::new(),
+            awaiting_frame_location: false,
         }
     }
 
@@ -76,6 +79,7 @@ impl Debugger {
         self.source_file = source_file.to_string();
         self.accumulated_lines.clear();
         self.pending_var_request = false;
+        self.awaiting_frame_location = false;
         self.stop_flag.store(false, Ordering::Relaxed);
 
         // Truncate the console capture file (program writes here via fprintf)
@@ -297,31 +301,19 @@ impl Debugger {
         }
 
         let mut needs_var_request = false;
+        let mut needs_auto_continue = false;
         let mut already_stopped = false;
 
         for line in lldb_lines {
             self.accumulated_lines.push(line.clone());
 
+            // Mark that we saw a stop — defer location to the frame line.
             if !already_stopped && line.contains("stop reason =") {
-                if let Some(loc) = self.parse_stop_location() {
-                    self.state = DebugState::Paused {
-                        file: loc.0.clone(),
-                        line: loc.1,
-                    };
-                    events.push(DebugEvent::Stopped {
-                        file: loc.0,
-                        line: loc.1,
-                    });
-                    needs_var_request = true;
-                    self.pending_var_request = true;
-                    already_stopped = true;
-                }
+                self.awaiting_frame_location = true;
             }
 
-            if !already_stopped
-                && !line.contains("stop reason")
-                && line.contains("frame #0")
-            {
+            // Resolve frame location after a stop reason (or standalone frame#0).
+            if !already_stopped && line.contains("frame #0") {
                 if let Some(loc) = parse_frame_location(&line) {
                     self.state = DebugState::Paused {
                         file: loc.0.clone(),
@@ -334,6 +326,13 @@ impl Debugger {
                     needs_var_request = true;
                     self.pending_var_request = true;
                     already_stopped = true;
+                    self.awaiting_frame_location = false;
+                } else if self.awaiting_frame_location {
+                    // Stopped in code without source info (runtime cleanup).
+                    // Auto-continue past it so the program exits normally.
+                    needs_auto_continue = true;
+                    already_stopped = true;
+                    self.awaiting_frame_location = false;
                 }
             }
 
@@ -354,16 +353,11 @@ impl Debugger {
             let _ = self.send_command("frame variable");
         }
 
-        events
-    }
-
-    fn parse_stop_location(&self) -> Option<(String, usize)> {
-        for line in self.accumulated_lines.iter().rev().take(15) {
-            if let Some(loc) = parse_frame_location(line) {
-                return Some(loc);
-            }
+        if needs_auto_continue {
+            let _ = self.send_command("continue");
         }
-        None
+
+        events
     }
 
     pub fn is_running(&self) -> bool {
