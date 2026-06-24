@@ -360,11 +360,7 @@ pub fn run_with_options(
                     }
                     DebugEvent::Frames(frames) => {
                         for (idx, display) in frames {
-                            match ide
-                                .callstack_frames
-                                .iter()
-                                .position(|(i, _)| *i == idx)
-                            {
+                            match ide.callstack_frames.iter().position(|(i, _)| *i == idx) {
                                 Some(pos) => ide.callstack_frames[pos] = (idx, display),
                                 None => ide.callstack_frames.push((idx, display)),
                             }
@@ -933,9 +929,7 @@ fn handle_build(
         Some(Err(e)) => {
             crate::trace_log!("handle_build: err {e}");
             if let Some(line) = extract_error_line(&e) {
-                editor
-                    .borrow_mut()
-                    .set_build_error(Some((line, e.clone())));
+                editor.borrow_mut().set_build_error(Some((line, e.clone())));
             }
             append_output_line(output, &format!("Build error: {}", e), Some(ERROR));
             use turbo_vision::views::msgbox::message_box_error;
@@ -1732,7 +1726,9 @@ fn jump_to_source_line(
     };
 
     let editor_inner = editor.borrow().editor_rc();
-    editor_inner.borrow_mut().scroll_to_line(line.saturating_sub(1));
+    editor_inner
+        .borrow_mut()
+        .scroll_to_line(line.saturating_sub(1));
     Some(editor)
 }
 

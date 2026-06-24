@@ -110,9 +110,7 @@ impl View for CallStackPanel {
     }
 
     fn handle_event(&mut self, event: &mut Event) {
-        if event.what == EventType::MouseDown
-            && (event.mouse.buttons & MB_LEFT_BUTTON != 0)
-        {
+        if event.what == EventType::MouseDown && (event.mouse.buttons & MB_LEFT_BUTTON != 0) {
             let mx = event.mouse.pos.x;
             let my = event.mouse.pos.y;
             if mx >= self.bounds.a.x

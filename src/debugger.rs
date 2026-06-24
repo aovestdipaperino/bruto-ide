@@ -824,12 +824,11 @@ fn format_with_meta(meta: &VarMeta, raw: &str) -> Option<String> {
                     .and_then(|(_, v)| v.parse().ok())
             });
 
-            let active_variant_fields: Vec<&str> = match tag_value
-                .and_then(|tv| cases.iter().find(|(vs, _)| vs.contains(&tv)))
-            {
-                Some((_, fs)) => fs.iter().map(|(n, _)| n.as_str()).collect(),
-                None => Vec::new(),
-            };
+            let active_variant_fields: Vec<&str> =
+                match tag_value.and_then(|tv| cases.iter().find(|(vs, _)| vs.contains(&tv))) {
+                    Some((_, fs)) => fs.iter().map(|(n, _)| n.as_str()).collect(),
+                    None => Vec::new(),
+                };
 
             // Names of fields belonging to *some other* variant — we drop these
             // from the watch output so the user only sees the active case.
@@ -1013,9 +1012,7 @@ mod tests {
 
     #[test]
     fn parse_frame_line_user_code() {
-        let r = parse_frame_line(
-            "  * frame #0: 0x0000000100003f80 a.out`main at /tmp/test.pas:5",
-        );
+        let r = parse_frame_line("  * frame #0: 0x0000000100003f80 a.out`main at /tmp/test.pas:5");
         assert_eq!(r, Some((0, "a.out`main at /tmp/test.pas:5".into())));
     }
 
