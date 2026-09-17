@@ -4,6 +4,7 @@
 /// as an interior child so that the gutter is visually part of the editor frame.
 use crate::commands::CM_CLOSE_EDITOR;
 use crate::gutter::{BreakpointGutter, GUTTER_WIDTH};
+use crate::heat::{Heat, LineProfile, PROFILE_COL_WIDTH, format_share, heat_bucket, text_hash};
 use crate::ide_file_editor::IdeFileEditor;
 
 use std::cell::RefCell;
@@ -14,7 +15,7 @@ use std::time::SystemTime;
 
 use turbo_vision::app::Application;
 use turbo_vision::core::command::{CM_CLOSE, CommandId};
-use turbo_vision::core::draw::Cell;
+use turbo_vision::core::draw::{Cell, DrawBuffer};
 use turbo_vision::core::event::{Event, EventType};
 use turbo_vision::core::geometry::{Point, Rect};
 use turbo_vision::core::palette::{Attr, TvColor};
@@ -31,7 +32,7 @@ use turbo_vision::views::indicator::Indicator;
 use turbo_vision::views::scrollbar::ScrollBar;
 use turbo_vision::views::shared::Shared;
 use turbo_vision::views::syntax::SyntaxHighlighter;
-use turbo_vision::views::view::{View, dispatch_to_child};
+use turbo_vision::views::view::{View, dispatch_to_child, write_line_to_terminal};
 use turbo_vision::views::window::{Window, WindowLike};
 
 /// Desktop-installable handle to an [`IdeEditorWindow`]. The owning `Rc`
@@ -73,6 +74,9 @@ pub struct IdeEditorWindow {
     /// row overlay; the message is surfaced in the status bar when the
     /// caret sits on that line. Cleared at the start of every build.
     build_error: RefCell<Option<(usize, String)>>,
+    /// Per-line timings from the last profile run. `None` until a profile
+    /// run completes; cleared on the next build or when the text changes.
+    line_profile: Option<LineProfile>,
 }
 
 impl IdeEditorWindow {
@@ -142,6 +146,7 @@ impl IdeEditorWindow {
             v_scrollbar_idx,
             indicator_idx,
             build_error: RefCell::new(None),
+            line_profile: None,
         };
 
         ide_win.window.set_focus(true);
@@ -239,7 +244,8 @@ impl IdeEditorWindow {
         if self.gutter.borrow().bounds() != gutter_bounds {
             self.gutter.borrow_mut().set_bounds(gutter_bounds);
         }
-        let editor_bounds = Rect::new(GUTTER_WIDTH, 0, interior_w, interior_h);
+        let col = self.profile_col_width();
+        let editor_bounds = Rect::new(GUTTER_WIDTH + col, 0, interior_w, interior_h);
         if self.editor.borrow().bounds() != editor_bounds {
             self.editor.borrow_mut().set_bounds(editor_bounds);
         }
@@ -260,6 +266,98 @@ impl IdeEditorWindow {
                     Cell::new(existing.ch, Attr::new(existing.attr.fg, bg)),
                 );
             }
+        }
+    }
+
+    pub fn set_line_profile(&mut self, p: Option<LineProfile>) {
+        self.line_profile = p;
+    }
+
+    pub fn has_line_profile(&self) -> bool {
+        self.line_profile.is_some()
+    }
+
+    pub fn profile_column_visible(&self) -> bool {
+        self.line_profile.as_ref().is_some_and(|p| p.visible)
+    }
+
+    pub fn set_profile_column_visible(&mut self, on: bool) {
+        if let Some(p) = self.line_profile.as_mut() {
+            p.visible = on;
+        }
+    }
+
+    /// Width of the profile column currently occupying interior space.
+    fn profile_col_width(&self) -> i16 {
+        if self.profile_column_visible() {
+            PROFILE_COL_WIDTH
+        } else {
+            0
+        }
+    }
+
+    /// Drop the profile if the buffer changed since it was taken.
+    fn drop_profile_if_edited(&mut self) {
+        let Some(p) = self.line_profile.as_ref() else {
+            return;
+        };
+        let now = text_hash(&self.editor.borrow().get_text());
+        if now != p.text_hash {
+            self.line_profile = None;
+        }
+    }
+
+    /// Paint the profile column and the heat tint for every visible row.
+    fn draw_profile_overlay(&self, terminal: &mut Terminal) {
+        let Some(p) = self.line_profile.as_ref() else {
+            return;
+        };
+        if !p.visible {
+            return;
+        }
+        let extent = self.window.extent();
+        let interior_h = extent.height().saturating_sub(2);
+        let scroll_y = self.editor.borrow().get_delta().y.max(0) as usize;
+        let col_x = 1 + GUTTER_WIDTH; // after the frame line and the gutter
+        let text_attr = Attr::new(TvColor::LightGray, TvColor::Rgb { r: 0, g: 0, b: 100 });
+        for row in 0..interior_h {
+            let line = scroll_y + row as usize + 1;
+            let (self_ns, _hits) = p.lines.get(&line).copied().unwrap_or((0, 0));
+            let share = if p.total_ns == 0 {
+                0.0
+            } else {
+                self_ns as f64 / p.total_ns as f64
+            };
+            let heat = heat_bucket(share);
+            let bg = match heat {
+                Heat::None => None,
+                Heat::Cold => Some(TvColor::Rgb { r: 110, g: 0, b: 0 }),
+                Heat::Warm => Some(TvColor::Red),
+                Heat::Hot => Some(TvColor::LightRed),
+            };
+            if let Some(bg) = bg {
+                self.highlight_interior_row(terminal, row, bg);
+                if heat == Heat::Hot {
+                    // Bright rows get white text so the tint stays legible.
+                    let y = 1 + row;
+                    for x in (col_x + PROFILE_COL_WIDTH)..(extent.b.x - 1) {
+                        if let Some(c) = terminal.read_cell(x, y) {
+                            terminal.write_cell(
+                                x,
+                                y,
+                                Cell::new(c.ch, Attr::new(TvColor::White, bg)),
+                            );
+                        }
+                    }
+                }
+            }
+            let mut buf = DrawBuffer::new(PROFILE_COL_WIDTH as usize);
+            let attr = match bg {
+                Some(bg) => Attr::new(TvColor::White, bg),
+                None => text_attr,
+            };
+            buf.move_str(0, &format_share(self_ns, p.total_ns), attr);
+            write_line_to_terminal(terminal, col_x, 1 + row, &buf);
         }
     }
 }
@@ -300,6 +398,10 @@ impl_view_for_window!(IdeEditorWindow {
         // lands on `1 + r`.
         let interior_h = self.window.extent().height() - 2;
         let scroll_y = self.editor.borrow().get_delta().y.max(0) as usize;
+
+        // Profile column and heat tint first; the error and exec overlays
+        // below paint over it because they are more urgent.
+        self.draw_profile_overlay(terminal);
 
         // Overlay error-line highlight FIRST, so a debugger exec line on
         // the same row paints over it (the program counter is more
@@ -363,6 +465,12 @@ impl_view_for_window!(IdeEditorWindow {
         }
 
         self.window_handle_event(event);
+
+        // An edit invalidates the profile. Only keyboard events can change
+        // the text, so the hash is checked there and never per frame.
+        if event.what == EventType::Nothing && self.line_profile.is_some() {
+            self.drop_profile_if_edited();
+        }
 
         // The inner Window's frame turns close-button clicks into CM_CLOSE.
         // Translate to CM_CLOSE_EDITOR so the IDE can show a save prompt before
@@ -474,6 +582,7 @@ impl FileEditor for IdeEditorWindow {
         *self.last_mtime.borrow_mut() = read_mtime(&path);
         *self.file_path.borrow_mut() = Some(path);
         self.gutter.borrow_mut().clear_breakpoints();
+        self.line_profile = None;
         Ok(())
     }
 
@@ -483,6 +592,7 @@ impl FileEditor for IdeEditorWindow {
         *self.file_path.borrow_mut() = None;
         *self.last_mtime.borrow_mut() = None;
         self.gutter.borrow_mut().clear_breakpoints();
+        self.line_profile = None;
     }
 
     fn last_known_mtime(&self) -> Option<SystemTime> {
@@ -515,6 +625,7 @@ impl FileEditor for IdeEditorWindow {
         };
         self.editor.borrow_mut().load_file(&path)?;
         *self.last_mtime.borrow_mut() = read_mtime(&path);
+        self.line_profile = None;
         Ok(())
     }
 

@@ -61,3 +61,12 @@ pub const CM_SHOW_OUTPUT: u16 = 442;
 
 /// Show / re-open the Call Stack window (hidden by default).
 pub const CM_SHOW_CALLSTACK: u16 = 443;
+
+/// Build with profiler instrumentation, run, and show results (Shift+F9)
+pub const CM_PROFILE: u16 = 450;
+
+/// Open the Profile window
+pub const CM_SHOW_PROFILE: u16 = 451;
+
+/// Show or hide the per-line profile column in the focused editor
+pub const CM_TOGGLE_PROFILE_COLUMN: u16 = 452;

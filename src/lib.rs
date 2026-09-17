@@ -4,6 +4,7 @@ pub mod callstack_window;
 pub mod commands;
 pub mod debugger;
 pub mod gutter;
+pub mod heat;
 pub mod ide;
 pub mod ide_editor;
 pub mod ide_file_editor;
