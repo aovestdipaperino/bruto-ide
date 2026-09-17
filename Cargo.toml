@@ -11,3 +11,4 @@ readme = "README.md"
 [dependencies]
 bruto-lang = "1.0.2"
 turbo-vision = "3.0"
+crossterm = "0.29"

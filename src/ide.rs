@@ -8,9 +8,11 @@
 use crate::callstack_window::CallStackPanel;
 use crate::commands::*;
 use crate::debugger::{DebugEvent, Debugger, VarType};
+use crate::heat::{LineProfile, text_hash};
 use crate::ide_editor::{IdeEditorWindow, SharedIdeEditorWindow};
 use crate::ide_file_editor::IdeFileEditor;
 use crate::output_panel::OutputPanel;
+use crate::profile_window::ProfilePanel;
 use crate::watch_window::WatchPanel;
 use bruto_lang::language::{BuildPhase, BuildResult, Language};
 
@@ -140,6 +142,15 @@ struct IdeState {
     /// Host-supplied About dialog body, taken from IdeOptions at startup.
     /// `None` means fall back to the generic Bruto IDE blurb.
     about_text: Option<String>,
+    /// Layout used to (re-)spawn the Profile window.
+    profile_bounds: Rect,
+    /// `Some(id)` while the Profile window is on the desktop.
+    profile_win_id: Option<turbo_vision::views::view::ViewId>,
+    /// Shared Profile model — survives close/re-open.
+    profile_panel: Rc<RefCell<ProfilePanel>>,
+    /// Editor whose buffer the last profile run measured; jumps from the
+    /// Profile window land here.
+    profile_editor: Option<Rc<RefCell<IdeEditorWindow>>>,
 }
 
 /// Wrap a fresh Watches `Window` around the shared [`WatchPanel`] and add it
@@ -188,6 +199,29 @@ fn install_callstack_window(
         turbo_vision::views::window::WindowPaletteType::Gray,
     );
     win.add(Shared::new(Rc::clone(callstack)));
+    win.set_state_flag(State::SHADOW, false);
+    app.desktop.add(win)
+}
+
+/// Wrap a fresh "Profile" `Window` around the shared [`ProfilePanel`] and
+/// add it to the desktop. Mirrors [`install_callstack_window`].
+fn install_profile_window(
+    app: &mut Application,
+    bounds: Rect,
+    panel: &Rc<RefCell<ProfilePanel>>,
+) -> turbo_vision::views::view::ViewId {
+    let interior_w = bounds.width() - 2;
+    let interior_h = bounds.height() - 2;
+    panel
+        .borrow_mut()
+        .set_bounds(Rect::new(0, 0, interior_w, interior_h));
+
+    let mut win = turbo_vision::views::window::Window::new_with_type(
+        bounds,
+        "Profile",
+        turbo_vision::views::window::WindowPaletteType::Gray,
+    );
+    win.add(Shared::new(Rc::clone(panel)));
     win.set_state_flag(State::SHADOW, false);
     app.desktop.add(win)
 }
@@ -272,6 +306,16 @@ pub fn run_with_options(
         callstack_interior_h,
     ))));
 
+    // ── Profile window (hidden at start). Same slot as the call stack;
+    // the user can drag either once shown.
+    let profile_bounds = callstack_bounds;
+    let profile_panel = Rc::new(RefCell::new(ProfilePanel::new(Rect::new(
+        0,
+        0,
+        profile_bounds.width() - 2,
+        profile_bounds.height() - 2,
+    ))));
+
     let mut ide = IdeState {
         debugger: Debugger::new(),
         watch_vars: Vec::new(),
@@ -297,6 +341,10 @@ pub fn run_with_options(
         output_term: Rc::clone(&output_term),
         callstack: Rc::clone(&callstack),
         about_text: options.about_text.take(),
+        profile_bounds,
+        profile_win_id: None,
+        profile_panel: Rc::clone(&profile_panel),
+        profile_editor: None,
     };
 
     // ── Event loop ───────────────────────────────────────
@@ -490,7 +538,10 @@ pub fn run_with_options(
                             event = Event::command(CM_OPEN);
                         }
                         KB_F9 => {
-                            event = Event::command(CM_BUILD);
+                            let shift = event
+                                .key_modifiers
+                                .contains(crossterm::event::KeyModifiers::SHIFT);
+                            event = Event::command(if shift { CM_PROFILE } else { CM_BUILD });
                         }
                         KB_F5 => {
                             event = Event::command(CM_DEBUG_START);
@@ -554,6 +605,11 @@ pub fn run_with_options(
                         ide.callstack_win_id = None;
                     }
                 }
+                if let Some(id) = ide.profile_win_id
+                    && !app.desktop.contains_id(id)
+                {
+                    ide.profile_win_id = None;
+                }
 
                 // Did the user just double-click a watch row? Open the
                 // type-aware value editor and push the result into lldb.
@@ -568,6 +624,11 @@ pub fn run_with_options(
                 let pending_jump = callstack.borrow_mut().take_pending_jump();
                 if let Some(row) = pending_jump {
                     handle_callstack_jump(&mut app, &mut ide, row);
+                }
+
+                let profile_jump = profile_panel.borrow_mut().take_pending_jump();
+                if let Some(line) = profile_jump {
+                    handle_profile_jump(&mut app, &mut ide, line);
                 }
             }
             Ok(None) => {}
@@ -699,6 +760,25 @@ fn handle_command(
             handle_build(app, language, &mut output_rc.borrow_mut(), ide);
             if let Some(exe) = ide.exe_path.clone() {
                 handle_run(&exe, &ide.console_capture_path, &mut output_rc.borrow_mut());
+            }
+            true
+        }
+        CM_PROFILE => {
+            handle_profile(app, language, &mut output_rc.borrow_mut(), ide);
+            true
+        }
+        CM_SHOW_PROFILE => {
+            if ide.profile_win_id.is_none() {
+                let id = install_profile_window(app, ide.profile_bounds, &ide.profile_panel);
+                ide.profile_win_id = Some(id);
+            }
+            true
+        }
+        CM_TOGGLE_PROFILE_COLUMN => {
+            if let Some(ed) = focused_editor(app) {
+                let mut ed = ed.borrow_mut();
+                let on = ed.profile_column_visible();
+                ed.set_profile_column_visible(!on);
             }
             true
         }
@@ -905,6 +985,8 @@ fn handle_build(
     // signal — leaving a stale red bar around after a successful build
     // would mislead the user.
     editor.borrow_mut().set_build_error(None);
+    // A new build makes the last profile stale.
+    editor.borrow_mut().set_line_profile(None);
 
     let job = language.build_job_at(&source, file_path.as_deref());
     match run_build_with_progress(app, job) {
@@ -1109,6 +1191,162 @@ fn handle_run(exe_path: &str, console_capture_path: &Option<String>, output: &mu
     }
 }
 
+/// Build with instrumentation, run to completion, then load the profile
+/// into the editor's heat column and the Profile window.
+fn handle_profile(
+    app: &mut Application,
+    language: &Box<dyn Language>,
+    output: &mut TerminalWidget,
+    ide: &mut IdeState,
+) {
+    let Some(editor) = focused_editor(app) else {
+        append_output_line(
+            output,
+            "No active editor — open or create a file first.",
+            Some(CONSOLE_INFO),
+        );
+        return;
+    };
+    if ide.debugger.is_running() {
+        append_output_line(
+            output,
+            "Stop the debugger before profiling.",
+            Some(CONSOLE_INFO),
+        );
+        return;
+    }
+    let source = editor.borrow().editor_rc().borrow().get_text();
+    let file_path = editor.borrow().file_path().map(std::path::PathBuf::from);
+    output.clear();
+    append_output_line(output, "Building with profiler...", Some(CONSOLE_INFO));
+    editor.borrow_mut().set_build_error(None);
+    editor.borrow_mut().set_line_profile(None);
+
+    let job = language.profile_job_at(&source, file_path.as_deref());
+    let result = match run_build_with_progress(app, job) {
+        Some(Ok(r)) => r,
+        Some(Err(e)) => {
+            if let Some(line) = extract_error_line(&e) {
+                editor.borrow_mut().set_build_error(Some((line, e.clone())));
+            }
+            append_output_line(output, &format!("Build error: {e}"), Some(ERROR));
+            use turbo_vision::views::msgbox::message_box_error;
+            message_box_error(app, &e);
+            return;
+        }
+        None => {
+            append_output_line(output, "Build cancelled.", Some(CONSOLE_INFO));
+            return;
+        }
+    };
+
+    let Some(prof_path) = result.profile_path.clone() else {
+        append_output_line(
+            output,
+            "Profiling is not available for this language.",
+            Some(ERROR),
+        );
+        return;
+    };
+    let _ = std::fs::remove_file(&prof_path);
+    append_output_line(
+        output,
+        &format!("Running {} (profiled)...", result.exe_path),
+        Some(CONSOLE_INFO),
+    );
+    let capture = Some(result.console_capture_path.clone());
+    if let Some(c) = &capture {
+        let _ = std::fs::write(c, "");
+    }
+    let status = std::process::Command::new(&result.exe_path)
+        .env("BRUTO_PROF_OUT", &prof_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    if let Some(c) = &capture
+        && let Ok(contents) = std::fs::read_to_string(c)
+    {
+        for line in contents.lines() {
+            output.append_line_colored(line.to_string(), OUTPUT_TEXT);
+        }
+    }
+    let code = match status {
+        Ok(s) => s.code().unwrap_or(-1),
+        Err(e) => {
+            output.append_line_colored(format!("Failed to run: {e}"), CONSOLE_ERR);
+            return;
+        }
+    };
+    if !std::path::Path::new(&prof_path).exists() {
+        output.append_line_colored(
+            format!("Program exited with code {code}; no profile written"),
+            ERROR,
+        );
+        return;
+    }
+    output.append_line_colored(
+        format!("Exit code: {code}"),
+        if code == 0 { SUCCESS } else { ERROR },
+    );
+
+    let profile = match language.load_profile(&result) {
+        Ok(p) => p,
+        Err(e) => {
+            use turbo_vision::views::msgbox::message_box_error;
+            message_box_error(app, &format!("Could not read profile:\n{e}"));
+            return;
+        }
+    };
+    if profile.truncated {
+        output.append_line_colored(
+            "Warning: profile truncated (too many call sites or recursion too deep)".to_string(),
+            CONSOLE_INFO,
+        );
+    }
+    output.append_line_colored(
+        format!(
+            "Profile: {} nodes, {:.1} ms total",
+            profile.nodes.len(),
+            profile.elapsed_ns as f64 / 1e6
+        ),
+        SUCCESS,
+    );
+
+    editor.borrow_mut().set_line_profile(Some(LineProfile {
+        lines: profile.line_totals(),
+        total_ns: profile.elapsed_ns.max(1),
+        visible: true,
+        text_hash: text_hash(&source),
+    }));
+    ide.profile_editor = Some(Rc::clone(&editor));
+    ide.profile_panel.borrow_mut().set_profile(Some(profile));
+    if ide.profile_win_id.is_none() {
+        let id = install_profile_window(app, ide.profile_bounds, &ide.profile_panel);
+        ide.profile_win_id = Some(id);
+    }
+}
+
+/// Scroll the profiled editor to `line` (1-based) and focus it.
+fn handle_profile_jump(app: &mut Application, ide: &mut IdeState, line: usize) {
+    let Some(editor) = ide.profile_editor.clone() else {
+        return;
+    };
+    for i in 0..app.desktop.child_count() {
+        let is_target = app
+            .desktop
+            .child_at(i)
+            .as_any()
+            .downcast_ref::<SharedIdeEditorWindow>()
+            .is_some_and(|s| Rc::ptr_eq(s.inner(), &editor));
+        app.desktop.child_at_mut(i).set_focus(is_target);
+    }
+    editor
+        .borrow()
+        .editor_rc()
+        .borrow_mut()
+        .scroll_to_line(line.saturating_sub(1));
+}
+
 fn handle_debug_start_continue(
     app: &mut Application,
     language: &Box<dyn Language>,
@@ -1232,6 +1470,10 @@ fn update_command_states(app: &mut Application, ide: &IdeState) {
     let watch_open = ide.watch_win_id.is_some();
     let output_open = ide.output_win_id.is_some();
     let callstack_open = ide.callstack_win_id.is_some();
+    let profile_open = ide.profile_win_id.is_some();
+    let has_profile = focused
+        .as_ref()
+        .is_some_and(|e| e.borrow().has_line_profile());
 
     let toggle = |cmd: u16, enabled: bool| {
         if enabled {
@@ -1274,6 +1516,9 @@ fn update_command_states(app: &mut Application, ide: &IdeState) {
     toggle(CM_SHOW_WATCHES, !watch_open);
     toggle(CM_SHOW_OUTPUT, !output_open);
     toggle(CM_SHOW_CALLSTACK, !callstack_open);
+    toggle(CM_PROFILE, editor_focused && !dbg_running);
+    toggle(CM_SHOW_PROFILE, !profile_open);
+    toggle(CM_TOGGLE_PROFILE_COLUMN, has_profile);
 }
 
 /// Show the latest build error in the status line whenever the caret
@@ -1789,6 +2034,7 @@ fn build_menu_bar(width: i16) -> MenuBar {
     let build_menu = Menu::from_items(vec![
         item("~B~uild", CM_BUILD, KB_F9, "F9"),
         item("~R~un", CM_RUN, 0, "Ctrl-F9"),
+        item("~P~rofile", CM_PROFILE, 0, "Shift-F9"),
     ]);
     let debug_menu = Menu::from_items(vec![
         item("~S~tart / Continue", CM_DEBUG_START, KB_F5, "F5"),
@@ -1801,6 +2047,8 @@ fn build_menu_bar(width: i16) -> MenuBar {
         item("~W~atches", CM_SHOW_WATCHES, 0, ""),
         item("~O~utput", CM_SHOW_OUTPUT, 0, ""),
         item("~C~all Stack", CM_SHOW_CALLSTACK, 0, ""),
+        item("~P~rofile", CM_SHOW_PROFILE, 0, ""),
+        item("Profile Colu~m~n", CM_TOGGLE_PROFILE_COLUMN, 0, ""),
     ]);
     let about_menu = Menu::from_items(vec![item("~A~bout...", CM_ABOUT, 0, "")]);
 
