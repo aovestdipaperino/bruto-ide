@@ -83,6 +83,22 @@ fn fmt_ns(ns: u64) -> String {
     }
 }
 
+/// Clip `left` so it fits within `label_max` characters, replacing the tail
+/// with `…` when truncation is needed. Returns an empty string when
+/// `label_max` is 0.
+fn clip_label(left: &str, label_max: usize) -> String {
+    if left.chars().count() <= label_max {
+        return left.to_string();
+    }
+    if label_max == 0 {
+        return String::new();
+    }
+    let keep = label_max.saturating_sub(1);
+    let mut clipped: String = left.chars().take(keep).collect();
+    clipped.push('…');
+    clipped
+}
+
 pub struct ProfilePanel {
     core: ViewCore,
     profile: Option<Profile>,
@@ -235,8 +251,7 @@ impl View for ProfilePanel {
                 ProfileKind::Routine => node.name.clone(),
                 ProfileKind::Line => format!("line {}", node.line),
             };
-            let left = format!("{}{}{}", " ".repeat(row.depth * 2), marker, label);
-            buf.move_str(0, &left, text);
+            let mut left = format!("{}{}{}", " ".repeat(row.depth * 2), marker, label);
 
             let pct = node.total_ns as f64 * 100.0 / total as f64;
             let right = format!(
@@ -246,6 +261,15 @@ impl View for ProfilePanel {
                 node.calls
             );
             let rlen = right.chars().count();
+            let label_max = if rlen + 1 < width {
+                width - rlen - 1
+            } else {
+                width
+            };
+            if left.chars().count() > label_max {
+                left = clip_label(&left, label_max);
+            }
+            buf.move_str(0, &left, text);
             if rlen + 1 < width {
                 buf.move_str(width - rlen, &right, num);
             }
@@ -370,5 +394,42 @@ mod tests {
         panel.handle_event(&mut Event::keyboard(KB_ENTER));
         assert_eq!(panel.take_pending_jump(), Some(3));
         assert_eq!(panel.take_pending_jump(), None);
+    }
+
+    #[test]
+    fn long_labels_are_clipped_before_the_numbers() {
+        assert_eq!(clip_label("AAAAAAAA", 5), "AAAA…");
+        assert_eq!(clip_label("AB", 5), "AB");
+        assert_eq!(clip_label("ABC", 0), "");
+
+        let long_name = "A".repeat(60);
+        let mut panel = ProfilePanel::new(Rect::new(0, 0, 40, 3));
+        panel.set_profile(Some(Profile {
+            elapsed_ns: 1000,
+            truncated: false,
+            nodes: vec![node(ProfileKind::Routine, &long_name, 1, None, 1000)],
+        }));
+        // The panel should build without panicking and the label logic
+        // should clip a name this long given the panel's width.
+        let right = format!(
+            "{pct:5.1}%  {:>8}  {:>8}  {:>6}",
+            fmt_ns(1000),
+            fmt_ns(500),
+            1,
+            pct = 100.0
+        );
+        let rlen = right.chars().count();
+        let width = 40usize;
+        let label_max = if rlen + 1 < width {
+            width - rlen - 1
+        } else {
+            width
+        };
+        let left = format!("  {long_name}");
+        assert!(left.chars().count() > label_max);
+        let clipped = clip_label(&left, label_max);
+        assert!(clipped.ends_with('…'));
+        assert!(clipped.chars().count() <= label_max);
+        assert_eq!(panel.row_count(), 1);
     }
 }
