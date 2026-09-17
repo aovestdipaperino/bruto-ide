@@ -52,8 +52,15 @@ pub fn flatten_tree(profile: &Profile, collapsed: &HashSet<usize>) -> Vec<Row> {
     }
 
     let mut rows = Vec::new();
+    let mut emitted: HashSet<usize> = HashSet::new();
     let mut stack: Vec<(usize, usize)> = roots.iter().rev().map(|&r| (r, 0)).collect();
     while let Some((idx, depth)) = stack.pop() {
+        if !emitted.insert(idx) {
+            continue;
+        }
+        if rows.len() > n {
+            break;
+        }
         let expandable = !children[idx].is_empty();
         let expanded = expandable && !collapsed.contains(&idx);
         rows.push(Row {
@@ -64,7 +71,9 @@ pub fn flatten_tree(profile: &Profile, collapsed: &HashSet<usize>) -> Vec<Row> {
         });
         if expanded {
             for &c in children[idx].iter().rev() {
-                stack.push((c, depth + 1));
+                if !emitted.contains(&c) {
+                    stack.push((c, depth + 1));
+                }
             }
         }
     }
@@ -378,6 +387,25 @@ mod tests {
         let order: Vec<usize> = rows.iter().map(|r| r.node).collect();
         assert_eq!(order, vec![0, 2, 1, 4]);
         assert!(rows[1].expandable && !rows[1].expanded);
+    }
+
+    #[test]
+    fn flatten_tree_terminates_on_cycle() {
+        // Bypass the reader (which now rejects this) to make sure the
+        // flattener itself is robust against a cyclic parent chain.
+        let profile = Profile {
+            elapsed_ns: 1000,
+            truncated: false,
+            nodes: vec![
+                node(ProfileKind::Routine, "a", 1, Some(1), 100),
+                node(ProfileKind::Routine, "b", 2, Some(0), 100),
+            ],
+        };
+        let rows = flatten_tree(&profile, &HashSet::new());
+        assert!(
+            rows.len() <= profile.nodes.len(),
+            "flatten_tree must not loop forever on a cyclic profile"
+        );
     }
 
     #[test]

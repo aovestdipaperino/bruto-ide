@@ -610,6 +610,12 @@ pub fn run_with_options(
                 {
                     ide.profile_win_id = None;
                 }
+                if let Some(ed) = ide.profile_editor.as_ref()
+                    && !ed.borrow().has_line_profile()
+                {
+                    ide.profile_panel.borrow_mut().clear();
+                    ide.profile_editor = None;
+                }
 
                 // Did the user just double-click a watch row? Open the
                 // type-aware value editor and push the result into lldb.
@@ -987,6 +993,7 @@ fn handle_build(
     editor.borrow_mut().set_build_error(None);
     // A new build makes the last profile stale.
     editor.borrow_mut().set_line_profile(None);
+    ide.profile_panel.borrow_mut().clear();
 
     let job = language.build_job_at(&source, file_path.as_deref());
     match run_build_with_progress(app, job) {
@@ -1318,6 +1325,11 @@ fn handle_profile(
         visible: true,
         text_hash: text_hash(&source),
     }));
+    if let Some(prev) = &ide.profile_editor
+        && !Rc::ptr_eq(prev, &editor)
+    {
+        prev.borrow_mut().set_line_profile(None);
+    }
     ide.profile_editor = Some(Rc::clone(&editor));
     ide.profile_panel.borrow_mut().set_profile(Some(profile));
     if ide.profile_win_id.is_none() {

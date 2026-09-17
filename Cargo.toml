@@ -11,4 +11,5 @@ readme = "README.md"
 [dependencies]
 bruto-lang = "1.0.2"
 turbo-vision = "3.0"
+# Same version turbo-vision uses; needed only for KeyModifiers in the Shift-F9 check.
 crossterm = "0.29"

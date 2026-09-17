@@ -353,7 +353,8 @@ impl IdeEditorWindow {
             }
             let mut buf = DrawBuffer::new(PROFILE_COL_WIDTH as usize);
             let attr = match bg {
-                Some(bg) => Attr::new(TvColor::White, bg),
+                Some(bg) if heat == Heat::Hot => Attr::new(TvColor::White, bg),
+                Some(bg) => Attr::new(TvColor::LightGray, bg),
                 None => text_attr,
             };
             buf.move_str(0, &format_share(self_ns, p.total_ns), attr);
@@ -464,11 +465,12 @@ impl_view_for_window!(IdeEditorWindow {
             }
         }
 
+        let was_keyboard = event.what == EventType::Keyboard;
         self.window_handle_event(event);
 
         // An edit invalidates the profile. Only keyboard events can change
         // the text, so the hash is checked there and never per frame.
-        if event.what == EventType::Nothing && self.line_profile.is_some() {
+        if event.what == EventType::Nothing && was_keyboard && self.line_profile.is_some() {
             self.drop_profile_if_edited();
         }
 
