@@ -2046,7 +2046,6 @@ fn build_menu_bar(width: i16) -> MenuBar {
     let build_menu = Menu::from_items(vec![
         item("~B~uild", CM_BUILD, KB_F9, "F9"),
         item("~R~un", CM_RUN, 0, "Ctrl-F9"),
-        item("~P~rofile", CM_PROFILE, 0, "Shift-F9"),
     ]);
     let debug_menu = Menu::from_items(vec![
         item("~S~tart / Continue", CM_DEBUG_START, KB_F5, "F5"),
@@ -2054,6 +2053,8 @@ fn build_menu_bar(width: i16) -> MenuBar {
         item("Step ~I~nto", CM_DEBUG_STEP_INTO, KB_F7, "F7"),
         MenuItem::separator(),
         item("Sto~p~", CM_DEBUG_STOP, 0, "Shift-F5"),
+        MenuItem::separator(),
+        item("~P~rofile", CM_PROFILE, 0, "Shift-F9"),
     ]);
     let window_menu = Menu::from_items(vec![
         item("~W~atches", CM_SHOW_WATCHES, 0, ""),
