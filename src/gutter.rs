@@ -8,9 +8,8 @@ use turbo_vision::core::draw::Cell;
 use turbo_vision::core::event::{Event, EventType, MB_LEFT_BUTTON};
 use turbo_vision::core::geometry::Rect;
 use turbo_vision::core::palette::{Attr, TvColor};
-use turbo_vision::core::state::StateFlags;
 use turbo_vision::terminal::Terminal;
-use turbo_vision::views::view::View;
+use turbo_vision::views::view::{View, ViewCore};
 
 /// Width of the gutter in characters.
 pub const GUTTER_WIDTH: i16 = 1;
@@ -23,8 +22,7 @@ const BP_ATTR: Attr = Attr::new(TvColor::LightRed, TvColor::Red);
 const EXEC_ATTR: Attr = Attr::new(TvColor::Yellow, TvColor::Blue);
 
 pub struct BreakpointGutter {
-    bounds: Rect,
-    state: StateFlags,
+    core: ViewCore,
     breakpoints: HashSet<usize>,
     top_line: usize,
     current_exec_line: Option<usize>,
@@ -33,8 +31,7 @@ pub struct BreakpointGutter {
 impl BreakpointGutter {
     pub fn new(bounds: Rect) -> Self {
         Self {
-            bounds,
-            state: 0,
+            core: ViewCore::new(bounds),
             breakpoints: HashSet::new(),
             top_line: 0,
             current_exec_line: None,
@@ -94,20 +91,28 @@ impl BreakpointGutter {
 }
 
 impl View for BreakpointGutter {
-    fn bounds(&self) -> Rect {
-        self.bounds
+    fn core(&self) -> &ViewCore {
+        &self.core
     }
-    fn set_bounds(&mut self, bounds: Rect) {
-        self.bounds = bounds;
+    fn core_mut(&mut self) -> &mut ViewCore {
+        &mut self.core
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 
     fn draw(&mut self, terminal: &mut Terminal) {
-        let height = self.bounds.height_clamped() as usize;
-        let x = self.bounds.a.x as u16;
+        // Owner-relative coordinates: the gutter draws in its own space,
+        // column 0, one row per visible line.
+        let height = self.extent().height_clamped() as usize;
+        let x = 0i16;
 
         for row in 0..height {
             let line_num = self.top_line + row + 1;
-            let y = (self.bounds.a.y + row as i16) as u16;
+            let y = row as i16;
 
             if self.breakpoints.contains(&line_num) {
                 terminal.write_cell(x, y, Cell::new('\u{25A0}', BP_ATTR));
@@ -124,15 +129,9 @@ impl View for BreakpointGutter {
 
     fn handle_event(&mut self, event: &mut Event) {
         if event.what == EventType::MouseDown && (event.mouse.buttons & MB_LEFT_BUTTON != 0) {
-            let mouse_x = event.mouse.pos.x;
-            let mouse_y = event.mouse.pos.y;
-
-            if mouse_x >= self.bounds.a.x
-                && mouse_x < self.bounds.b.x
-                && mouse_y >= self.bounds.a.y
-                && mouse_y < self.bounds.b.y
-            {
-                let row = (mouse_y - self.bounds.a.y) as usize;
+            // Mouse positions arrive in the gutter's own space.
+            if self.extent().contains(event.mouse.pos) {
+                let row = event.mouse.pos.y as usize;
                 let line_num = self.top_line + row + 1;
                 self.toggle_breakpoint(line_num);
                 event.clear();
@@ -140,12 +139,6 @@ impl View for BreakpointGutter {
         }
     }
 
-    fn state(&self) -> StateFlags {
-        self.state
-    }
-    fn set_state(&mut self, state: StateFlags) {
-        self.state = state;
-    }
     fn get_palette(&self) -> Option<turbo_vision::core::palette::Palette> {
         None
     }

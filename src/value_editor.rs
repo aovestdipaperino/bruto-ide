@@ -13,6 +13,7 @@ use turbo_vision::core::command::{CM_CANCEL, CM_OK};
 use turbo_vision::core::geometry::Rect;
 use turbo_vision::views::button::Button;
 use turbo_vision::views::dialog::Dialog;
+use turbo_vision::views::group::GroupLike;
 use turbo_vision::views::input_line::InputLine;
 use turbo_vision::views::label::Label;
 use turbo_vision::views::validator::{FilterValidator, ValidatorRef};
@@ -29,46 +30,46 @@ pub fn prompt_set_value(
     current: &str,
 ) -> Option<String> {
     let (tw, th) = app.terminal.size();
-    let dw = 50i16.min(tw as i16 - 4);
+    let dw = 50i16.min(tw - 4);
     let dh = 9i16;
-    let x = ((tw as i16) - dw) / 2;
-    let y = ((th as i16) - dh) / 2;
+    let x = (tw - dw) / 2;
+    let y = (th - dh) / 2;
     let bounds = Rect::new(x, y, x + dw, y + dh);
 
     let title = format!("Set {name} ({})", ty.label());
     let mut dialog = Dialog::new(bounds, &title);
 
-    dialog.add(Box::new(Label::new(Rect::new(2, 2, 12, 3), "Value:")));
+    dialog.add(Label::new(Rect::new(2, 2, 12, 3), "Value:"));
 
-    let initial = setter_initial_text(ty, current);
-    let data = Rc::new(RefCell::new(initial));
-    let mut input = InputLine::new(
-        Rect::new(12, 2, dw - 4, 3),
-        max_length_for(ty),
-        Rc::clone(&data),
-    );
+    // The input line owns its text (turbo-vision 3.0); keep a typed handle
+    // and read the value back from the dialog after it closes.
+    let mut input = InputLine::new(Rect::new(12, 2, dw - 4, 3), max_length_for(ty));
+    input.set_text(setter_initial_text(ty, current));
     if let Some(v) = type_filter_validator(ty) {
         input.set_validator(v);
     }
-    dialog.add(Box::new(input));
+    let field = dialog.add_typed(input);
 
-    dialog.add(Box::new(Button::new(
+    dialog.add(Button::new(
         Rect::new(dw - 24, dh - 4, dw - 14, dh - 2),
         "~O~K",
         CM_OK,
         true,
-    )));
-    dialog.add(Box::new(Button::new(
+    ));
+    dialog.add(Button::new(
         Rect::new(dw - 12, dh - 4, dw - 2, dh - 2),
         "~C~ancel",
         CM_CANCEL,
         false,
-    )));
+    ));
 
     dialog.set_initial_focus();
     let result = dialog.execute(app);
     if result == CM_OK {
-        let entered = data.borrow().clone();
+        let entered = dialog
+            .get(field)
+            .map(|f| f.text().to_string())
+            .unwrap_or_default();
         if entered.is_empty() {
             return None;
         }

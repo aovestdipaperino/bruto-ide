@@ -17,212 +17,28 @@ use turbo_vision::core::command::{CM_CLOSE, CommandId};
 use turbo_vision::core::draw::Cell;
 use turbo_vision::core::event::{Event, EventType};
 use turbo_vision::core::geometry::{Point, Rect};
-use turbo_vision::core::palette::{Attr, Palette, TvColor};
-use turbo_vision::core::palette_chain::PaletteChainNode;
-use turbo_vision::core::state::StateFlags;
+use turbo_vision::core::palette::{Attr, TvColor};
+use turbo_vision::core::state::State;
+use turbo_vision::impl_view_for_window;
 use turbo_vision::terminal::Terminal;
 use turbo_vision::views::editor::EditorWindow;
 use turbo_vision::views::editor_traits::{
     Editor, ExternalState, FileEditor, confirm_save_on_close,
 };
 use turbo_vision::views::file_dialog::FileDialogBuilder;
+use turbo_vision::views::group::{Group, GroupLike};
 use turbo_vision::views::indicator::Indicator;
 use turbo_vision::views::scrollbar::ScrollBar;
+use turbo_vision::views::shared::Shared;
 use turbo_vision::views::syntax::SyntaxHighlighter;
-use turbo_vision::views::view::View;
-use turbo_vision::views::window::Window;
+use turbo_vision::views::view::{View, dispatch_to_child};
+use turbo_vision::views::window::{Window, WindowLike};
 
-// ── Rc<RefCell<...>> View wrappers (same pattern as EditWindow internals) ──
-
-struct SharedGutter(Rc<RefCell<BreakpointGutter>>);
-
-impl View for SharedGutter {
-    fn bounds(&self) -> Rect {
-        self.0.borrow().bounds()
-    }
-    fn set_bounds(&mut self, b: Rect) {
-        self.0.borrow_mut().set_bounds(b);
-    }
-    fn draw(&mut self, t: &mut Terminal) {
-        self.0.borrow_mut().draw(t);
-    }
-    fn handle_event(&mut self, e: &mut Event) {
-        self.0.borrow_mut().handle_event(e);
-    }
-    fn state(&self) -> StateFlags {
-        self.0.borrow().state()
-    }
-    fn set_state(&mut self, s: StateFlags) {
-        self.0.borrow_mut().set_state(s);
-    }
-    fn get_palette(&self) -> Option<Palette> {
-        None
-    }
-    fn set_palette_chain(&mut self, n: Option<PaletteChainNode>) {
-        self.0.borrow_mut().set_palette_chain(n);
-    }
-    fn get_palette_chain(&self) -> Option<&PaletteChainNode> {
-        None
-    }
-}
-
-struct SharedEditor(Rc<RefCell<EditorWindow>>);
-
-impl View for SharedEditor {
-    fn bounds(&self) -> Rect {
-        self.0.borrow().bounds()
-    }
-    fn set_bounds(&mut self, b: Rect) {
-        self.0.borrow_mut().set_bounds(b);
-    }
-    fn draw(&mut self, t: &mut Terminal) {
-        self.0.borrow_mut().draw(t);
-    }
-    fn handle_event(&mut self, e: &mut Event) {
-        self.0.borrow_mut().handle_event(e);
-    }
-    fn can_focus(&self) -> bool {
-        self.0.borrow().can_focus()
-    }
-    fn set_focus(&mut self, f: bool) {
-        self.0.borrow_mut().set_focus(f);
-    }
-    fn is_focused(&self) -> bool {
-        self.0.borrow().is_focused()
-    }
-    fn options(&self) -> u16 {
-        self.0.borrow().options()
-    }
-    fn set_options(&mut self, o: u16) {
-        self.0.borrow_mut().set_options(o);
-    }
-    fn state(&self) -> StateFlags {
-        self.0.borrow().state()
-    }
-    fn set_state(&mut self, s: StateFlags) {
-        self.0.borrow_mut().set_state(s);
-    }
-    fn update_cursor(&self, t: &mut Terminal) {
-        self.0.borrow().update_cursor(t);
-    }
-    fn get_palette(&self) -> Option<Palette> {
-        self.0.borrow().get_palette()
-    }
-    fn set_palette_chain(&mut self, n: Option<PaletteChainNode>) {
-        self.0.borrow_mut().set_palette_chain(n);
-    }
-    fn get_palette_chain(&self) -> Option<&PaletteChainNode> {
-        None
-    }
-}
-
-struct SharedScrollBar(Rc<RefCell<ScrollBar>>);
-
-impl View for SharedScrollBar {
-    fn bounds(&self) -> Rect {
-        self.0.borrow().bounds()
-    }
-    fn set_bounds(&mut self, b: Rect) {
-        self.0.borrow_mut().set_bounds(b);
-    }
-    fn draw(&mut self, t: &mut Terminal) {
-        self.0.borrow_mut().draw(t);
-    }
-    fn handle_event(&mut self, e: &mut Event) {
-        self.0.borrow_mut().handle_event(e);
-    }
-    fn get_palette(&self) -> Option<Palette> {
-        self.0.borrow().get_palette()
-    }
-    fn set_palette_chain(&mut self, n: Option<PaletteChainNode>) {
-        self.0.borrow_mut().set_palette_chain(n);
-    }
-    fn get_palette_chain(&self) -> Option<&PaletteChainNode> {
-        None
-    }
-}
-
-struct SharedIndicator(Rc<RefCell<Indicator>>);
-
-impl View for SharedIndicator {
-    fn bounds(&self) -> Rect {
-        self.0.borrow().bounds()
-    }
-    fn set_bounds(&mut self, b: Rect) {
-        self.0.borrow_mut().set_bounds(b);
-    }
-    fn draw(&mut self, t: &mut Terminal) {
-        self.0.borrow_mut().draw(t);
-    }
-    fn handle_event(&mut self, _e: &mut Event) {}
-    fn get_palette(&self) -> Option<Palette> {
-        self.0.borrow().get_palette()
-    }
-    fn set_palette_chain(&mut self, n: Option<PaletteChainNode>) {
-        self.0.borrow_mut().set_palette_chain(n);
-    }
-    fn get_palette_chain(&self) -> Option<&PaletteChainNode> {
-        None
-    }
-}
-
-/// View wrapper that lets the same `IdeEditorWindow` be installed on the
-/// desktop, removed (when the user clicks the close button), and re-installed
-/// later (when File→Open creates a window again). The owning `Rc` lives in
-/// the IDE main loop, so closing the wrapper drops only one ref and the
-/// underlying `IdeEditorWindow` (with its loaded buffer) stays alive.
-pub struct SharedIdeEditorWindow(pub Rc<RefCell<IdeEditorWindow>>);
-
-impl View for SharedIdeEditorWindow {
-    fn bounds(&self) -> Rect {
-        self.0.borrow().bounds()
-    }
-    fn set_bounds(&mut self, b: Rect) {
-        self.0.borrow_mut().set_bounds(b);
-    }
-    fn draw(&mut self, t: &mut Terminal) {
-        self.0.borrow_mut().draw(t);
-    }
-    fn handle_event(&mut self, e: &mut Event) {
-        self.0.borrow_mut().handle_event(e);
-    }
-    fn can_focus(&self) -> bool {
-        self.0.borrow().can_focus()
-    }
-    fn set_focus(&mut self, f: bool) {
-        self.0.borrow_mut().set_focus(f);
-    }
-    fn is_focused(&self) -> bool {
-        self.0.borrow().is_focused()
-    }
-    fn options(&self) -> u16 {
-        self.0.borrow().options()
-    }
-    fn set_options(&mut self, o: u16) {
-        self.0.borrow_mut().set_options(o);
-    }
-    fn state(&self) -> StateFlags {
-        self.0.borrow().state()
-    }
-    fn set_state(&mut self, s: StateFlags) {
-        self.0.borrow_mut().set_state(s);
-    }
-    fn get_palette(&self) -> Option<Palette> {
-        self.0.borrow().get_palette()
-    }
-    fn set_palette_chain(&mut self, n: Option<PaletteChainNode>) {
-        self.0.borrow_mut().set_palette_chain(n);
-    }
-    fn get_palette_chain(&self) -> Option<&PaletteChainNode> {
-        None
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-}
+/// Desktop-installable handle to an [`IdeEditorWindow`]. The owning `Rc`
+/// lives in the IDE main loop, so closing the wrapper drops only one ref and
+/// the underlying window (with its loaded buffer) stays alive; File→Open can
+/// re-install it later. Reach the window through [`Shared::inner`].
+pub type SharedIdeEditorWindow = Shared<IdeEditorWindow>;
 
 // ── IdeEditorWindow ──────────────────────────────────────
 
@@ -297,17 +113,16 @@ impl IdeEditorWindow {
             Some(Rc::clone(&indicator)),
         )));
 
-        // Add gutter and editor as interior children (relative coords → auto-converted)
-        window.add(Box::new(SharedGutter(Rc::clone(&gutter))));
-        window.add(Box::new(SharedEditor(Rc::clone(&editor))));
+        // Add gutter and editor as interior children (interior-relative coords)
+        window.add(Shared::new(Rc::clone(&gutter)));
+        window.add(Shared::new(Rc::clone(&editor)));
 
-        // Add scrollbars + indicator as frame children
+        // Add scrollbars + indicator as frame children (window-relative coords)
         let h_scrollbar_idx =
-            window.add_frame_child(Box::new(SharedScrollBar(Rc::clone(&h_scrollbar))));
+            window.add_frame_child(Box::new(Shared::new(Rc::clone(&h_scrollbar))));
         let v_scrollbar_idx =
-            window.add_frame_child(Box::new(SharedScrollBar(Rc::clone(&v_scrollbar))));
-        let indicator_idx =
-            window.add_frame_child(Box::new(SharedIndicator(Rc::clone(&indicator))));
+            window.add_frame_child(Box::new(Shared::new(Rc::clone(&v_scrollbar))));
+        let indicator_idx = window.add_frame_child(Box::new(Shared::new(Rc::clone(&indicator))));
 
         indicator.borrow_mut().set_value(Point::new(1, 1), false);
 
@@ -331,10 +146,7 @@ impl IdeEditorWindow {
 
         ide_win.window.set_focus(true);
         // Disable shadow — IDE windows are tiled, shadows waste space
-        let state = ide_win.window.state();
-        ide_win
-            .window
-            .set_state(state & !turbo_vision::core::state::SF_SHADOW);
+        ide_win.window.set_state_flag(State::SHADOW, false);
         ide_win
     }
 
@@ -381,97 +193,124 @@ impl IdeEditorWindow {
             .set_top_line(delta_y.max(0) as usize);
     }
 
-    /// Sync frame child positions after resize.
+    /// Sync frame child positions after resize. Frame children are
+    /// window-relative, so everything is laid out in the window's extent.
     fn sync_frame_children_positions(&mut self) {
-        let bounds = self.window.bounds();
-        let win_w = bounds.width();
-        let win_h = bounds.height();
+        let extent = self.window.extent();
+        let win_w = extent.width();
+        let win_h = extent.height();
 
         if win_h >= 3 {
             let h_bounds = Rect::new(
-                bounds.a.x + 18i16.min(win_w.saturating_sub(2)),
-                bounds.a.y + win_h - 1,
-                bounds.a.x + win_w - 2,
-                bounds.a.y + win_h,
+                18i16.min(win_w.saturating_sub(2)),
+                win_h - 1,
+                win_w - 2,
+                win_h,
             );
             self.window
                 .update_frame_child(self.h_scrollbar_idx, h_bounds);
         }
 
         if win_w >= 3 && win_h >= 4 {
-            let v_bounds = Rect::new(
-                bounds.a.x + win_w - 1,
-                bounds.a.y + 1,
-                bounds.a.x + win_w,
-                bounds.a.y + win_h - 2,
-            );
+            let v_bounds = Rect::new(win_w - 1, 1, win_w, win_h - 2);
             self.window
                 .update_frame_child(self.v_scrollbar_idx, v_bounds);
         }
 
         if win_h >= 3 {
-            let ind_bounds = Rect::new(
-                bounds.a.x + 2,
-                bounds.a.y + win_h - 1,
-                bounds.a.x + 16i16.min(win_w - 2),
-                bounds.a.y + win_h,
-            );
+            let ind_bounds = Rect::new(2, win_h - 1, 16i16.min(win_w - 2), win_h);
             self.window
                 .update_frame_child(self.indicator_idx, ind_bounds);
         }
     }
+
+    /// Lay the gutter and editor out side by side across the interior.
+    /// `Group::set_bounds` only moves children by their grow bits, and the
+    /// gutter must stay fixed-width, so both are positioned explicitly here.
+    /// Cheap to call every frame: writes only when the bounds differ.
+    fn sync_interior_layout(&mut self) {
+        let extent = self.window.extent();
+        let interior_w = extent.width().saturating_sub(2);
+        let interior_h = extent.height().saturating_sub(2);
+        if interior_w == 0 || interior_h == 0 {
+            return;
+        }
+        let gutter_bounds = Rect::new(0, 0, GUTTER_WIDTH, interior_h);
+        if self.gutter.borrow().bounds() != gutter_bounds {
+            self.gutter.borrow_mut().set_bounds(gutter_bounds);
+        }
+        let editor_bounds = Rect::new(GUTTER_WIDTH, 0, interior_w, interior_h);
+        if self.editor.borrow().bounds() != editor_bounds {
+            self.editor.borrow_mut().set_bounds(editor_bounds);
+        }
+    }
+
+    /// Paint `bg` behind every cell of interior row `visible_row` (gutter and
+    /// editor columns), keeping the glyphs and foreground already drawn.
+    fn highlight_interior_row(&self, terminal: &mut Terminal, visible_row: i16, bg: TvColor) {
+        let extent = self.window.extent();
+        let row_y = 1 + visible_row; // inside the top frame line
+        let x_start = 1i16; // inside the left frame line
+        let x_end = extent.b.x - 1; // stop before the right frame line
+        for x in x_start..x_end {
+            if let Some(existing) = terminal.read_cell(x, row_y) {
+                terminal.write_cell(
+                    x,
+                    row_y,
+                    Cell::new(existing.ch, Attr::new(existing.attr.fg, bg)),
+                );
+            }
+        }
+    }
 }
 
-impl View for IdeEditorWindow {
-    fn bounds(&self) -> Rect {
-        self.window.bounds()
+impl GroupLike for IdeEditorWindow {
+    fn group(&self) -> &Group {
+        self.window.group()
     }
+    fn group_mut(&mut self) -> &mut Group {
+        self.window.group_mut()
+    }
+}
+
+impl WindowLike for IdeEditorWindow {
+    fn window(&self) -> &Window {
+        &self.window
+    }
+    fn window_mut(&mut self) -> &mut Window {
+        &mut self.window
+    }
+}
+
+impl_view_for_window!(IdeEditorWindow {
     fn set_bounds(&mut self, bounds: Rect) {
-        self.window.set_bounds(bounds);
+        self.window_set_bounds(bounds);
+        self.sync_interior_layout();
     }
 
     fn draw(&mut self, terminal: &mut Terminal) {
         self.sync_title_from_file_path();
         self.sync_frame_children_positions();
+        self.sync_interior_layout();
         self.sync_gutter_scroll();
-        self.window.draw(terminal);
+        self.window_draw(terminal);
+
+        // Overlays are drawn in the window's own space (owner-relative
+        // coordinates): row 0 is the top frame line, so interior row `r`
+        // lands on `1 + r`.
+        let interior_h = self.window.extent().height() - 2;
+        let scroll_y = self.editor.borrow().get_delta().y.max(0) as usize;
 
         // Overlay error-line highlight FIRST, so a debugger exec line on
         // the same row paints over it (the program counter is more
         // immediately relevant than a stale build error).
         let error_line = self.build_error.borrow().as_ref().map(|(l, _)| *l);
-        if let Some(error_line) = error_line {
-            let scroll_y = self.editor.borrow().get_delta().y.max(0) as usize;
-            if error_line > scroll_y {
-                let visible_row = (error_line - scroll_y - 1) as i16;
-                let bounds = self.window.bounds();
-                let interior_h = bounds.height() - 2;
-                if visible_row >= 0 && visible_row < interior_h {
-                    let highlight_bg = TvColor::Red;
-                    let gutter_x = bounds.a.x + 1;
-                    let row_y = bounds.a.y + 1 + visible_row;
-                    for col in 0..GUTTER_WIDTH {
-                        let x = gutter_x + col;
-                        if let Some(existing) = terminal.read_cell(x, row_y) {
-                            terminal.write_cell(
-                                x as u16,
-                                row_y as u16,
-                                Cell::new(existing.ch, Attr::new(existing.attr.fg, highlight_bg)),
-                            );
-                        }
-                    }
-                    let editor_x = gutter_x + GUTTER_WIDTH;
-                    let editor_end = bounds.b.x - 1;
-                    for x in editor_x..editor_end {
-                        if let Some(existing) = terminal.read_cell(x, row_y) {
-                            terminal.write_cell(
-                                x as u16,
-                                row_y as u16,
-                                Cell::new(existing.ch, Attr::new(existing.attr.fg, highlight_bg)),
-                            );
-                        }
-                    }
-                }
+        if let Some(error_line) = error_line
+            && error_line > scroll_y
+        {
+            let visible_row = (error_line - scroll_y - 1) as i16;
+            if visible_row >= 0 && visible_row < interior_h {
+                self.highlight_interior_row(terminal, visible_row, TvColor::Red);
             }
         }
 
@@ -479,44 +318,13 @@ impl View for IdeEditorWindow {
         // The gutter already shows ► but we also paint the entire line's
         // background green so the current statement is clearly visible.
         let exec_line = self.gutter.borrow().current_exec_line();
-        if let Some(exec_line) = exec_line {
-            let scroll_y = self.editor.borrow().get_delta().y.max(0) as usize;
-            // exec_line is 1-based, scroll_y is 0-based top line
-            if exec_line > scroll_y {
-                let visible_row = (exec_line - scroll_y - 1) as i16;
-                let bounds = self.window.bounds();
-                let interior_h = bounds.height() - 2;
-
-                if visible_row >= 0 && visible_row < interior_h {
-                    let highlight_bg = TvColor::Green;
-
-                    // Highlight the gutter columns for this row
-                    let gutter_x = bounds.a.x + 1;
-                    let row_y = bounds.a.y + 1 + visible_row;
-                    for col in 0..GUTTER_WIDTH {
-                        let x = gutter_x + col;
-                        if let Some(existing) = terminal.read_cell(x, row_y) {
-                            terminal.write_cell(
-                                x as u16,
-                                row_y as u16,
-                                Cell::new(existing.ch, Attr::new(existing.attr.fg, highlight_bg)),
-                            );
-                        }
-                    }
-
-                    // Highlight the editor columns for this row
-                    let editor_x = gutter_x + GUTTER_WIDTH;
-                    let editor_end = bounds.b.x - 1; // stop before right frame
-                    for x in editor_x..editor_end {
-                        if let Some(existing) = terminal.read_cell(x, row_y) {
-                            terminal.write_cell(
-                                x as u16,
-                                row_y as u16,
-                                Cell::new(existing.ch, Attr::new(existing.attr.fg, highlight_bg)),
-                            );
-                        }
-                    }
-                }
+        // exec_line is 1-based, scroll_y is 0-based top line
+        if let Some(exec_line) = exec_line
+            && exec_line > scroll_y
+        {
+            let visible_row = (exec_line - scroll_y - 1) as i16;
+            if visible_row >= 0 && visible_row < interior_h {
+                self.highlight_interior_row(terminal, visible_row, TvColor::Green);
             }
         }
     }
@@ -524,7 +332,8 @@ impl View for IdeEditorWindow {
     fn handle_event(&mut self, event: &mut Event) {
         // Forward mouse events to scrollbars (matching EditWindow pattern).
         // Window::handle_event does NOT dispatch to frame_children, so without
-        // this the scrollbars would be purely decorative.
+        // this the scrollbars would be purely decorative. `dispatch_to_child`
+        // translates the mouse position into the scrollbar's own space.
         if event.what == EventType::MouseDown
             || event.what == EventType::MouseMove
             || event.what == EventType::MouseUp
@@ -532,18 +341,18 @@ impl View for IdeEditorWindow {
             let mut scrollbar_handled = false;
 
             if let Some(child) = self.window.get_frame_child_mut(self.h_scrollbar_idx) {
-                child.handle_event(event);
+                dispatch_to_child(&mut **child, event);
                 if event.what == EventType::Nothing {
                     scrollbar_handled = true;
                 }
             }
 
-            if !scrollbar_handled {
-                if let Some(child) = self.window.get_frame_child_mut(self.v_scrollbar_idx) {
-                    child.handle_event(event);
-                    if event.what == EventType::Nothing {
-                        scrollbar_handled = true;
-                    }
+            if !scrollbar_handled
+                && let Some(child) = self.window.get_frame_child_mut(self.v_scrollbar_idx)
+            {
+                dispatch_to_child(&mut **child, event);
+                if event.what == EventType::Nothing {
+                    scrollbar_handled = true;
                 }
             }
 
@@ -553,9 +362,7 @@ impl View for IdeEditorWindow {
             }
         }
 
-        let old_bounds = self.window.bounds();
-
-        self.window.handle_event(event);
+        self.window_handle_event(event);
 
         // The inner Window's frame turns close-button clicks into CM_CLOSE.
         // Translate to CM_CLOSE_EDITOR so the IDE can show a save prompt before
@@ -565,82 +372,19 @@ impl View for IdeEditorWindow {
             return;
         }
 
-        // After resize/move, recalculate gutter and editor bounds.
-        // Group::set_bounds applies the same width delta to ALL children, but the
-        // gutter must stay fixed-width — so we override both here.
-        let new_bounds = self.window.bounds();
-        if old_bounds != new_bounds {
-            let win_w = new_bounds.width();
-            let win_h = new_bounds.height();
-            let interior_w = win_w.saturating_sub(2);
-            let interior_h = win_h.saturating_sub(2);
-
-            if interior_w > 0 && interior_h > 0 {
-                let interior_a = Point::new(new_bounds.a.x + 1, new_bounds.a.y + 1);
-
-                self.gutter.borrow_mut().set_bounds(Rect::new(
-                    interior_a.x,
-                    interior_a.y,
-                    interior_a.x + GUTTER_WIDTH,
-                    interior_a.y + interior_h,
-                ));
-
-                self.editor.borrow_mut().set_bounds(Rect::new(
-                    interior_a.x + GUTTER_WIDTH,
-                    interior_a.y,
-                    interior_a.x + interior_w,
-                    interior_a.y + interior_h,
-                ));
-            }
-        }
-    }
-
-    fn can_focus(&self) -> bool {
-        true
+        // After a resize the gutter must keep its fixed width and the editor
+        // take the rest; the plain grow-bit cascade would not do that.
+        self.sync_interior_layout();
     }
 
     fn set_focus(&mut self, focused: bool) {
-        self.window.set_focus(focused);
-        // Window::set_focus only propagates focus to its interior children and
-        // never toggles SF_FOCUSED on itself. The IDE event loop relies on
-        // is_focused() to find the window to close, so we set the flag here
-        // (state forwards to the inner window).
-        let s = self.window.state();
-        self.window.set_state(if focused {
-            s | turbo_vision::core::state::SF_FOCUSED
-        } else {
-            s & !turbo_vision::core::state::SF_FOCUSED
-        });
+        self.window_set_focus(focused);
+        // The window base only propagates focus to its interior children and
+        // marks itself ACTIVE, never FOCUSED. The IDE event loop relies on
+        // is_focused() to find the window to close, so set the flag here.
+        self.set_state_flag(State::FOCUSED, focused);
     }
-
-    fn is_focused(&self) -> bool {
-        self.window.is_focused()
-    }
-
-    fn options(&self) -> u16 {
-        self.window.options()
-    }
-    fn set_options(&mut self, o: u16) {
-        self.window.set_options(o);
-    }
-    fn state(&self) -> StateFlags {
-        self.window.state()
-    }
-    fn set_state(&mut self, s: StateFlags) {
-        self.window.set_state(s);
-    }
-
-    fn get_palette(&self) -> Option<Palette> {
-        self.window.get_palette()
-    }
-
-    fn set_palette_chain(&mut self, n: Option<PaletteChainNode>) {
-        self.window.set_palette_chain(n);
-    }
-    fn get_palette_chain(&self) -> Option<&PaletteChainNode> {
-        self.window.get_palette_chain()
-    }
-}
+});
 
 // ── Trait impls ──────────────────────────────────────────
 
@@ -776,10 +520,10 @@ impl FileEditor for IdeEditorWindow {
 
     fn prompt_save_as(&mut self, app: &mut Application) -> bool {
         let (tw, th) = app.terminal.size();
-        let dw = 64i16.min(tw as i16 - 4);
-        let dh = 18i16.min(th as i16 - 4);
-        let x = ((tw as i16) - dw) / 2;
-        let y = ((th as i16) - dh) / 2;
+        let dw = 64i16.min(tw - 4);
+        let dh = 18i16.min(th - 4);
+        let x = (tw - dw) / 2;
+        let y = (th - dh) / 2;
         let bounds = Rect::new(x, y, x + dw, y + dh);
         let mut dialog = FileDialogBuilder::new()
             .bounds(bounds)

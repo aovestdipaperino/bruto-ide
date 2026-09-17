@@ -4,9 +4,8 @@ use turbo_vision::core::draw::DrawBuffer;
 use turbo_vision::core::event::{Event, EventType, MB_LEFT_BUTTON};
 use turbo_vision::core::geometry::Rect;
 use turbo_vision::core::palette::{Attr, TvColor};
-use turbo_vision::core::state::StateFlags;
 use turbo_vision::terminal::Terminal;
-use turbo_vision::views::view::{View, write_line_to_terminal};
+use turbo_vision::views::view::{View, ViewCore, write_line_to_terminal};
 
 use crate::debugger::VarType;
 
@@ -16,8 +15,7 @@ const VAL_ATTR: Attr = Attr::new(TvColor::Blue, TvColor::LightGray);
 const BG_ATTR: Attr = Attr::new(TvColor::Black, TvColor::LightGray);
 
 pub struct WatchPanel {
-    bounds: Rect,
-    state: StateFlags,
+    core: ViewCore,
     variables: Vec<(String, String, VarType)>,
     /// Set when a watch row is double-clicked. The IDE event loop drains
     /// this each tick (via [`take_pending_edit`]) and opens the value
@@ -29,8 +27,7 @@ pub struct WatchPanel {
 impl WatchPanel {
     pub fn new(bounds: Rect) -> Self {
         Self {
-            bounds,
-            state: 0,
+            core: ViewCore::new(bounds),
             variables: Vec::new(),
             pending_edit: None,
         }
@@ -58,16 +55,23 @@ impl WatchPanel {
 }
 
 impl View for WatchPanel {
-    fn bounds(&self) -> Rect {
-        self.bounds
+    fn core(&self) -> &ViewCore {
+        &self.core
     }
-    fn set_bounds(&mut self, bounds: Rect) {
-        self.bounds = bounds;
+    fn core_mut(&mut self) -> &mut ViewCore {
+        &mut self.core
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 
     fn draw(&mut self, terminal: &mut Terminal) {
-        let width = self.bounds.width_clamped() as usize;
-        let height = self.bounds.height_clamped() as usize;
+        let extent = self.extent();
+        let width = extent.width_clamped() as usize;
+        let height = extent.height_clamped() as usize;
 
         for row in 0..height {
             let mut buf = DrawBuffer::new(width);
@@ -80,12 +84,7 @@ impl View for WatchPanel {
                 buf.move_str(name.len() + 3, value, VAL_ATTR);
             }
 
-            write_line_to_terminal(
-                terminal,
-                self.bounds.a.x,
-                self.bounds.a.y + row as i16,
-                &buf,
-            );
+            write_line_to_terminal(terminal, 0, row as i16, &buf);
         }
     }
 
@@ -93,27 +92,14 @@ impl View for WatchPanel {
         if event.what == EventType::MouseDown
             && event.mouse.double_click
             && (event.mouse.buttons & MB_LEFT_BUTTON != 0)
+            && self.extent().contains(event.mouse.pos)
         {
-            let mx = event.mouse.pos.x;
-            let my = event.mouse.pos.y;
-            if mx >= self.bounds.a.x
-                && mx < self.bounds.b.x
-                && my >= self.bounds.a.y
-                && my < self.bounds.b.y
-            {
-                let row = (my - self.bounds.a.y) as usize;
-                if row < self.variables.len() {
-                    self.pending_edit = Some(row);
-                    event.clear();
-                }
+            let row = event.mouse.pos.y as usize;
+            if row < self.variables.len() {
+                self.pending_edit = Some(row);
+                event.clear();
             }
         }
-    }
-    fn state(&self) -> StateFlags {
-        self.state
-    }
-    fn set_state(&mut self, state: StateFlags) {
-        self.state = state;
     }
     fn get_palette(&self) -> Option<turbo_vision::core::palette::Palette> {
         None

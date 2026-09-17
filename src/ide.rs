@@ -28,16 +28,20 @@ use turbo_vision::core::event::{
     Event, EventType, KB_ALT_X, KB_F2, KB_F3, KB_F5, KB_F7, KB_F8, KB_F9,
 };
 use turbo_vision::core::geometry::Rect;
-use turbo_vision::core::menu_data::{Menu, MenuItem};
+use turbo_vision::core::menu_data::{Menu, MenuItem, MenuItemBuilder};
 use turbo_vision::core::palette::{Attr, TvColor};
-use turbo_vision::core::state::SF_CLOSED;
+use turbo_vision::core::state::State;
+use turbo_vision::core::status_data::StatusItemBuilder;
 use turbo_vision::views::View;
 use turbo_vision::views::editor_traits::{Editor as _, ExternalState, FileEditor};
 use turbo_vision::views::file_dialog::FileDialogBuilder;
+use turbo_vision::views::group::GroupLike;
 use turbo_vision::views::menu_bar::{MenuBar, SubMenu};
-use turbo_vision::views::msgbox::{MF_CANCEL_BUTTON, MF_NO_BUTTON, MF_YES_BUTTON, message_box};
-use turbo_vision::views::status_line::{StatusItem, StatusLine};
+use turbo_vision::views::msgbox::{MsgBox, message_box};
+use turbo_vision::views::shared::Shared;
+use turbo_vision::views::status_line::StatusLine;
 use turbo_vision::views::terminal_widget::TerminalWidget;
+use turbo_vision::views::view::{ViewCore, dispatch_to_child};
 
 /// Host-application hooks that influence first-run behaviour. The IDE itself
 /// stays agnostic of any config file format — the host owns persistence and
@@ -147,11 +151,8 @@ fn install_watch_window(
     watch_bounds: Rect,
     watch: &Rc<RefCell<WatchPanel>>,
 ) -> turbo_vision::views::view::ViewId {
-    // Reset the panel's bounds back to interior-relative before re-adding.
-    // After the first install, Group::add() rewrote them to absolute window
-    // coordinates; without this reset, the second install would offset the
-    // (already-absolute) bounds by the new window's position and the panel
-    // would render off-screen.
+    // Size the panel to the new window's interior before re-adding it; the
+    // user may have resized the previous window before closing it.
     let interior_w = watch_bounds.width() - 2;
     let interior_h = watch_bounds.height() - 2;
     watch
@@ -163,13 +164,9 @@ fn install_watch_window(
         "Watches",
         turbo_vision::views::window::WindowPaletteType::Gray,
     );
-    watch_win.add(Box::new(WatchView(Rc::clone(watch))));
-    {
-        use turbo_vision::core::state::SF_SHADOW;
-        let state = watch_win.state();
-        watch_win.set_state(state & !SF_SHADOW);
-    }
-    app.desktop.add(Box::new(watch_win))
+    watch_win.add(Shared::new(Rc::clone(watch)));
+    watch_win.set_state_flag(State::SHADOW, false);
+    app.desktop.add(watch_win)
 }
 
 /// Wrap a fresh "Call Stack" `Window` around the shared [`CallStackPanel`] and
@@ -190,13 +187,9 @@ fn install_callstack_window(
         "Call Stack",
         turbo_vision::views::window::WindowPaletteType::Gray,
     );
-    win.add(Box::new(CallStackView(Rc::clone(callstack))));
-    {
-        use turbo_vision::core::state::SF_SHADOW;
-        let state = win.state();
-        win.set_state(state & !SF_SHADOW);
-    }
-    app.desktop.add(Box::new(win))
+    win.add(Shared::new(Rc::clone(callstack)));
+    win.set_state_flag(State::SHADOW, false);
+    app.desktop.add(win)
 }
 
 const OUTPUT_TEXT: Attr = Attr::new(TvColor::LightGray, TvColor::Black);
@@ -223,9 +216,7 @@ pub fn run_with_options(
     crate::trace_log::init_for_session();
     crate::trace_log!("ide startup; lang={}", language.name());
     let mut app = Application::new()?;
-    let (width, height) = app.terminal.size();
-    let w = width as i16;
-    let h = height as i16;
+    let (w, h) = app.terminal.size();
 
     let menu_bar = build_menu_bar(w);
     app.set_menu_bar(menu_bar);
@@ -315,12 +306,14 @@ pub fn run_with_options(
         update_command_states(&mut app, &ide);
         update_status_hint(&mut app);
         app.terminal.force_full_redraw();
-        app.desktop.draw(&mut app.terminal);
+        // Each top-level view draws in its own space; `draw_view` pushes
+        // the view's origin around the call (turbo-vision 3.0).
+        app.terminal.draw_view(&mut app.desktop);
         if let Some(ref mut mb) = app.menu_bar {
-            mb.draw(&mut app.terminal);
+            app.terminal.draw_view(mb);
         }
         if let Some(ref mut sl) = app.status_line {
-            sl.draw(&mut app.terminal);
+            app.terminal.draw_view(sl);
         }
         let _ = app.terminal.flush();
 
@@ -472,11 +465,11 @@ pub fn run_with_options(
         match app.terminal.poll_event(Duration::from_millis(30)) {
             Ok(Some(mut event)) => {
                 if let Some(ref mut sl) = app.status_line {
-                    sl.handle_event(&mut event);
+                    dispatch_to_child(sl, &mut event);
                 }
 
                 if let Some(ref mut mb) = app.menu_bar {
-                    mb.handle_event(&mut event);
+                    dispatch_to_child(mb, &mut event);
                     if event.what == EventType::Keyboard || event.what == EventType::MouseUp {
                         if let Some(cmd) = mb.check_cascading_submenu(&mut app.terminal) {
                             if cmd != 0 {
@@ -526,7 +519,7 @@ pub fn run_with_options(
                     }
                 }
 
-                app.desktop.handle_event(&mut event);
+                dispatch_to_child(&mut app.desktop, &mut event);
 
                 // Frame-generated commands (e.g. CM_CLOSE from a close-button click)
                 // are produced during desktop dispatch, so re-run handle_command afterwards.
@@ -541,7 +534,7 @@ pub fn run_with_options(
                 // Sweep any windows that self-closed during dispatch (Window::auto_close).
                 // Editors don't auto-close — they bubble CM_CLOSE up so confirm_close_focused_editor
                 // can prompt save first; for them, close_focused_window does the SF_CLOSED + sweep.
-                app.desktop.remove_closed_windows();
+                let _ = app.desktop.remove_closed_windows();
 
                 // After the sweep, check whether the Watches / Output windows are
                 // still on the desktop. If not (user clicked their close button),
@@ -638,7 +631,7 @@ fn handle_command(
                     "Output",
                     Rc::clone(&ide.output_term),
                 );
-                let id = app.desktop.add(Box::new(panel));
+                let id = app.desktop.add(panel);
                 ide.output_win_id = Some(id);
             }
             true
@@ -766,8 +759,8 @@ fn install_editor(app: &mut Application, editor: Rc<RefCell<IdeEditorWindow>>) {
         "install_editor: pre-add desktop_children={}",
         app.desktop.child_count()
     );
-    let wrapper = SharedIdeEditorWindow(editor);
-    app.desktop.add(Box::new(wrapper));
+    let wrapper: SharedIdeEditorWindow = Shared::new(editor);
+    app.desktop.add(wrapper);
     // The newly added child is at the end; focus it via desktop's last index.
     let last = app.desktop.child_count().saturating_sub(1);
     if last < app.desktop.child_count() {
@@ -970,37 +963,36 @@ fn run_build_with_progress(
     app: &mut Application,
     mut job: Box<dyn bruto_lang::language::BuildJob>,
 ) -> Option<Result<BuildResult, String>> {
+    use turbo_vision::app::ModalTick;
     use turbo_vision::core::command::CM_CANCEL;
-    use turbo_vision::core::state::SF_MODAL;
     use turbo_vision::views::button::Button;
     use turbo_vision::views::dialog::Dialog;
 
     let (tw, th) = app.terminal.size();
-    let dw = 50i16.min(tw as i16 - 4);
+    let dw = 50i16.min(tw - 4);
     let dh = 7i16;
-    let x = ((tw as i16) - dw) / 2;
-    let y = ((th as i16) - dh) / 2;
+    let x = (tw - dw) / 2;
+    let y = (th - dh) / 2;
     let bounds = Rect::new(x, y, x + dw, y + dh);
 
     let mut dialog = Dialog::new(bounds, "Build");
 
     let progress_text = Rc::new(RefCell::new("Compiling…".to_string()));
-    dialog.add(Box::new(ProgressView::new(
+    dialog.add(ProgressView::new(
         Rect::new(2, 2, dw - 2, 3),
         Rc::clone(&progress_text),
-    )));
+    ));
 
     let cancel_w = 12i16;
     let cancel_x = (dw - cancel_w) / 2;
-    dialog.add(Box::new(Button::new(
+    dialog.add(Button::new(
         Rect::new(cancel_x, dh - 4, cancel_x + cancel_w, dh - 2),
         "~C~ancel",
         CM_CANCEL,
         true,
-    )));
+    ));
 
-    let old_state = dialog.state();
-    dialog.set_state(old_state | SF_MODAL);
+    dialog.set_state_flag(State::MODAL, true);
     dialog.set_initial_focus();
 
     // Hide the terminal cursor for the duration so it doesn't blink in
@@ -1008,111 +1000,77 @@ fn run_build_with_progress(
     // anyway, just the Cancel button.
     let _ = app.terminal.hide_cursor();
 
-    let result = run_progress_loop(app, &mut dialog, &mut job, &progress_text);
+    // `execute_modal` is the library's one modal loop: it draws the desktop
+    // and the dialog, dispatches events to the dialog, and calls the tick
+    // closure once per iteration so the build can advance between frames.
+    // Events route ONLY to the dialog — the desktop is purely visual while
+    // the modal is up. Clicking Cancel ends the loop through the dialog's
+    // own CloseOn policy; `job` then drops and kills any live child process.
+    let mut outcome: Option<Result<BuildResult, String>> = None;
+    app.execute_modal(&mut dialog, |_app, _dialog| match job.poll() {
+        BuildPhase::Pending(label) => {
+            *progress_text.borrow_mut() = label;
+            ModalTick::Continue
+        }
+        BuildPhase::Done(r) => {
+            outcome = Some(Ok(r));
+            ModalTick::End(CM_BUILD_DONE)
+        }
+        BuildPhase::Failed(e) => {
+            outcome = Some(Err(e));
+            ModalTick::End(CM_BUILD_DONE)
+        }
+    });
 
     // Show cursor again before we hand back to the main event loop;
     // its update_cursor will reposition it to whatever's focused now.
     let _ = app.terminal.show_cursor(0, 0);
-    result
-}
-
-fn run_progress_loop(
-    app: &mut Application,
-    dialog: &mut turbo_vision::views::dialog::Dialog,
-    job: &mut Box<dyn bruto_lang::language::BuildJob>,
-    progress_text: &Rc<RefCell<String>>,
-) -> Option<Result<BuildResult, String>> {
-    use turbo_vision::core::command::CM_CANCEL;
-    let _ = CM_CANCEL; // silence unused
-
-    loop {
-        // Force-clear the back buffer so the dialog overlay doesn't
-        // accidentally show a stale frame from before it opened.
-        app.terminal.force_full_redraw();
-
-        // Draw — desktop first (so the dialog overlays), then chrome,
-        // then the dialog itself.
-        app.desktop.draw(&mut app.terminal);
-        if let Some(ref mut mb) = app.menu_bar {
-            mb.draw(&mut app.terminal);
-        }
-        if let Some(ref mut sl) = app.status_line {
-            sl.draw(&mut app.terminal);
-        }
-        dialog.draw(&mut app.terminal);
-        let _ = app.terminal.flush();
-
-        // Advance the build by one step.
-        match job.poll() {
-            BuildPhase::Pending(label) => {
-                *progress_text.borrow_mut() = label;
-            }
-            BuildPhase::Done(r) => return Some(Ok(r)),
-            BuildPhase::Failed(e) => return Some(Err(e)),
-        }
-
-        // Poll the terminal briefly so Cancel feels responsive without
-        // starving the build (which we re-poll on the next iteration).
-        // Events route ONLY to the dialog — the desktop is purely
-        // visual while the modal is up.
-        if let Ok(Some(mut event)) = app.terminal.poll_event(Duration::from_millis(30)) {
-            dialog.handle_event(&mut event);
-            if event.what == EventType::Command {
-                dialog.handle_event(&mut event);
-            }
-            if dialog.get_end_state() != 0 {
-                // Clicked Cancel — let `job` drop and kill the linker.
-                return None;
-            }
-        }
-    }
+    outcome
 }
 
 /// One-line view used by the build progress dialog. Reads its text
 /// from a `Rc<RefCell<String>>` so the polling loop can update what's
 /// shown without rebuilding the dialog.
 struct ProgressView {
-    bounds: Rect,
-    state: turbo_vision::core::state::StateFlags,
+    core: ViewCore,
     text: Rc<RefCell<String>>,
 }
 
 impl ProgressView {
     fn new(bounds: Rect, text: Rc<RefCell<String>>) -> Self {
         Self {
-            bounds,
-            state: 0,
+            core: ViewCore::new(bounds),
             text,
         }
     }
 }
 
 impl turbo_vision::views::View for ProgressView {
-    fn bounds(&self) -> Rect {
-        self.bounds
+    fn core(&self) -> &ViewCore {
+        &self.core
     }
-    fn set_bounds(&mut self, b: Rect) {
-        self.bounds = b;
+    fn core_mut(&mut self) -> &mut ViewCore {
+        &mut self.core
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
     fn draw(&mut self, terminal: &mut turbo_vision::terminal::Terminal) {
         use turbo_vision::core::draw::DrawBuffer;
         use turbo_vision::views::view::write_line_to_terminal;
 
-        let width = self.bounds.width_clamped() as usize;
+        let width = self.extent().width_clamped() as usize;
         let attr = self.map_color(1);
         let mut buf = DrawBuffer::new(width);
         buf.move_char(0, ' ', attr, width);
         let txt = self.text.borrow();
         buf.move_str(0, &txt, attr);
-        write_line_to_terminal(terminal, self.bounds.a.x, self.bounds.a.y, &buf);
+        write_line_to_terminal(terminal, 0, 0, &buf);
     }
     fn handle_event(&mut self, _event: &mut Event) {}
-    fn state(&self) -> turbo_vision::core::state::StateFlags {
-        self.state
-    }
-    fn set_state(&mut self, s: turbo_vision::core::state::StateFlags) {
-        self.state = s;
-    }
     fn get_palette(&self) -> Option<turbo_vision::core::palette::Palette> {
         None
     }
@@ -1359,7 +1317,7 @@ fn focused_editor(app: &mut Application) -> Option<Rc<RefCell<IdeEditorWindow>>>
             continue;
         }
         if let Some(shared) = child.as_any().downcast_ref::<SharedIdeEditorWindow>() {
-            return Some(Rc::clone(&shared.0));
+            return Some(Rc::clone(shared.inner()));
         }
     }
     None
@@ -1378,7 +1336,7 @@ fn find_editor_with_path(app: &mut Application, path: &Path) -> Option<usize> {
         else {
             continue;
         };
-        let Some(existing) = shared.0.borrow().file_path() else {
+        let Some(existing) = shared.inner().borrow().file_path() else {
             continue;
         };
         let canonical = std::fs::canonicalize(&existing).unwrap_or(existing);
@@ -1403,7 +1361,7 @@ fn poll_all_external_changes(app: &mut Application) {
             .as_any()
             .downcast_ref::<SharedIdeEditorWindow>()
         {
-            editors.push(Rc::clone(&shared.0));
+            editors.push(Rc::clone(shared.inner()));
         }
     }
 
@@ -1454,12 +1412,13 @@ fn close_focused_window(app: &mut Application) {
     crate::trace_log!("close_focused_window: pre desktop_children={count}");
     for i in 0..count {
         if app.desktop.child_at(i).is_focused() {
-            let state = app.desktop.child_at(i).state();
-            app.desktop.child_at_mut(i).set_state(state | SF_CLOSED);
+            app.desktop
+                .child_at_mut(i)
+                .set_state_flag(State::CLOSED, true);
             break;
         }
     }
-    app.desktop.remove_closed_windows();
+    let _ = app.desktop.remove_closed_windows();
     crate::trace_log!(
         "close_focused_window: post desktop_children={}",
         app.desktop.child_count()
@@ -1523,7 +1482,7 @@ fn confirm_close_focused_editor(app: &mut Application) -> bool {
     let result = message_box(
         app,
         &format!("{name} has been modified.\n\nSave changes?"),
-        MF_YES_BUTTON | MF_NO_BUTTON | MF_CANCEL_BUTTON,
+        MsgBox::YES_BUTTON | MsgBox::NO_BUTTON | MsgBox::CANCEL_BUTTON,
     );
     match result {
         CM_YES => {
@@ -1552,7 +1511,7 @@ fn confirm_close_all_dirty_editors(app: &mut Application) -> bool {
             .as_any()
             .downcast_ref::<SharedIdeEditorWindow>()
         {
-            editors.push(Rc::clone(&shared.0));
+            editors.push(Rc::clone(shared.inner()));
         }
     }
 
@@ -1573,7 +1532,7 @@ fn confirm_close_all_dirty_editors(app: &mut Application) -> bool {
         let result = message_box(
             app,
             &format!("{name} has been modified.\n\nSave changes?"),
-            MF_YES_BUTTON | MF_NO_BUTTON | MF_CANCEL_BUTTON,
+            MsgBox::YES_BUTTON | MsgBox::NO_BUTTON | MsgBox::CANCEL_BUTTON,
         );
         match result {
             CM_YES => {
@@ -1699,7 +1658,7 @@ fn jump_to_source_line(
         else {
             continue;
         };
-        let Some(path) = shared.0.borrow().file_path() else {
+        let Some(path) = shared.inner().borrow().file_path() else {
             continue;
         };
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
@@ -1720,7 +1679,7 @@ fn jump_to_source_line(
                 .child_at(idx)
                 .as_any()
                 .downcast_ref::<SharedIdeEditorWindow>()
-                .map(|s| Rc::clone(&s.0))?
+                .map(|s| Rc::clone(s.inner()))?
         }
         None => Rc::clone(ide.debug_editor.as_ref()?),
     };
@@ -1780,111 +1739,70 @@ fn show_about_dialog(app: &mut Application, language_name: &str, override_text: 
 
 fn centered_dialog_bounds(app: &Application) -> Rect {
     let (tw, th) = app.terminal.size();
-    let dw = 64i16.min(tw as i16 - 4);
-    let dh = 18i16.min(th as i16 - 4);
-    let x = ((tw as i16) - dw) / 2;
-    let y = ((th as i16) - dh) / 2;
+    let dw = 64i16.min(tw - 4);
+    let dh = 18i16.min(th - 4);
+    let x = (tw - dw) / 2;
+    let y = (th - dh) / 2;
     Rect::new(x, y, x + dw, y + dh)
-}
-
-// ── View wrapper ─────────────────────────────────────────
-
-struct WatchView(Rc<RefCell<WatchPanel>>);
-
-impl View for WatchView {
-    fn bounds(&self) -> Rect {
-        self.0.borrow().bounds()
-    }
-    fn set_bounds(&mut self, b: Rect) {
-        self.0.borrow_mut().set_bounds(b);
-    }
-    fn draw(&mut self, t: &mut turbo_vision::terminal::Terminal) {
-        self.0.borrow_mut().draw(t);
-    }
-    fn handle_event(&mut self, e: &mut Event) {
-        self.0.borrow_mut().handle_event(e);
-    }
-    fn state(&self) -> turbo_vision::core::state::StateFlags {
-        self.0.borrow().state()
-    }
-    fn set_state(&mut self, s: turbo_vision::core::state::StateFlags) {
-        self.0.borrow_mut().set_state(s);
-    }
-    fn get_palette(&self) -> Option<turbo_vision::core::palette::Palette> {
-        None
-    }
-}
-
-struct CallStackView(Rc<RefCell<CallStackPanel>>);
-
-impl View for CallStackView {
-    fn bounds(&self) -> Rect {
-        self.0.borrow().bounds()
-    }
-    fn set_bounds(&mut self, b: Rect) {
-        self.0.borrow_mut().set_bounds(b);
-    }
-    fn draw(&mut self, t: &mut turbo_vision::terminal::Terminal) {
-        self.0.borrow_mut().draw(t);
-    }
-    fn handle_event(&mut self, e: &mut Event) {
-        self.0.borrow_mut().handle_event(e);
-    }
-    fn state(&self) -> turbo_vision::core::state::StateFlags {
-        self.0.borrow().state()
-    }
-    fn set_state(&mut self, s: turbo_vision::core::state::StateFlags) {
-        self.0.borrow_mut().set_state(s);
-    }
-    fn get_palette(&self) -> Option<turbo_vision::core::palette::Palette> {
-        None
-    }
 }
 
 // ── Menu and status bar ──────────────────────────────────
 
+/// A menu entry with a bound key and the label shown beside it. `label` is
+/// display only when `key` is 0 (the editor handles Ctrl+Z and friends
+/// itself; the label just documents the binding).
+fn item(
+    text: &str,
+    command: turbo_vision::core::command::CommandId,
+    key: u16,
+    label: &str,
+) -> MenuItem {
+    let mut b = MenuItemBuilder::new().text(text).command(command);
+    if key != 0 {
+        b = b.key_code(key);
+    }
+    if !label.is_empty() {
+        b = b.shortcut(label);
+    }
+    b.build()
+}
+
 fn build_menu_bar(width: i16) -> MenuBar {
     let file_menu = Menu::from_items(vec![
-        MenuItem::with_shortcut("~N~ew", CM_NEW, 0, "", 0),
-        MenuItem::with_shortcut("~O~pen...", CM_OPEN, KB_F3, "F3", 0),
-        MenuItem::with_shortcut("~S~ave", CM_SAVE, KB_F2, "F2", 0),
-        MenuItem::with_shortcut("Save ~A~s...", CM_SAVE_AS, 0, "", 0),
+        item("~N~ew", CM_NEW, 0, ""),
+        item("~O~pen...", CM_OPEN, KB_F3, "F3"),
+        item("~S~ave", CM_SAVE, KB_F2, "F2"),
+        item("Save ~A~s...", CM_SAVE_AS, 0, ""),
         MenuItem::separator(),
-        MenuItem::with_shortcut("E~x~it", CM_QUIT, KB_ALT_X, "Alt-X", 0),
+        item("E~x~it", CM_QUIT, KB_ALT_X, "Alt-X"),
     ]);
     let edit_menu = Menu::from_items(vec![
-        MenuItem::with_shortcut("~U~ndo", CM_UNDO, 0, "Ctrl-Z", 0),
-        MenuItem::with_shortcut("~R~edo", CM_REDO, 0, "Ctrl-Y", 0),
+        item("~U~ndo", CM_UNDO, 0, "Ctrl-Z"),
+        item("~R~edo", CM_REDO, 0, "Ctrl-Y"),
         MenuItem::separator(),
-        MenuItem::with_shortcut("Cu~t~", CM_CUT, 0, "Ctrl-X", 0),
-        MenuItem::with_shortcut("~C~opy", CM_COPY, 0, "Ctrl-C", 0),
-        MenuItem::with_shortcut("~P~aste", CM_PASTE, 0, "Ctrl-V", 0),
+        item("Cu~t~", CM_CUT, 0, "Ctrl-X"),
+        item("~C~opy", CM_COPY, 0, "Ctrl-C"),
+        item("~P~aste", CM_PASTE, 0, "Ctrl-V"),
         MenuItem::separator(),
-        MenuItem::with_shortcut("Select ~A~ll", CM_SELECT_ALL, 0, "Ctrl-A", 0),
+        item("Select ~A~ll", CM_SELECT_ALL, 0, "Ctrl-A"),
     ]);
     let build_menu = Menu::from_items(vec![
-        MenuItem::with_shortcut("~B~uild", CM_BUILD, KB_F9, "F9", 0),
-        MenuItem::with_shortcut("~R~un", CM_RUN, 0, "Ctrl-F9", 0),
+        item("~B~uild", CM_BUILD, KB_F9, "F9"),
+        item("~R~un", CM_RUN, 0, "Ctrl-F9"),
     ]);
     let debug_menu = Menu::from_items(vec![
-        MenuItem::with_shortcut("~S~tart / Continue", CM_DEBUG_START, KB_F5, "F5", 0),
-        MenuItem::with_shortcut("Step ~O~ver", CM_DEBUG_STEP_OVER, KB_F8, "F8", 0),
-        MenuItem::with_shortcut("Step ~I~nto", CM_DEBUG_STEP_INTO, KB_F7, "F7", 0),
+        item("~S~tart / Continue", CM_DEBUG_START, KB_F5, "F5"),
+        item("Step ~O~ver", CM_DEBUG_STEP_OVER, KB_F8, "F8"),
+        item("Step ~I~nto", CM_DEBUG_STEP_INTO, KB_F7, "F7"),
         MenuItem::separator(),
-        MenuItem::with_shortcut("Sto~p~", CM_DEBUG_STOP, 0, "Shift-F5", 0),
+        item("Sto~p~", CM_DEBUG_STOP, 0, "Shift-F5"),
     ]);
     let window_menu = Menu::from_items(vec![
-        MenuItem::with_shortcut("~W~atches", CM_SHOW_WATCHES, 0, "", 0),
-        MenuItem::with_shortcut("~O~utput", CM_SHOW_OUTPUT, 0, "", 0),
-        MenuItem::with_shortcut("~C~all Stack", CM_SHOW_CALLSTACK, 0, "", 0),
+        item("~W~atches", CM_SHOW_WATCHES, 0, ""),
+        item("~O~utput", CM_SHOW_OUTPUT, 0, ""),
+        item("~C~all Stack", CM_SHOW_CALLSTACK, 0, ""),
     ]);
-    let about_menu = Menu::from_items(vec![MenuItem::with_shortcut(
-        "~A~bout...",
-        CM_ABOUT,
-        0,
-        "",
-        0,
-    )]);
+    let about_menu = Menu::from_items(vec![item("~A~bout...", CM_ABOUT, 0, "")]);
 
     let mut menu_bar = MenuBar::new(Rect::new(0, 0, width, 1));
     menu_bar.add_submenu(SubMenu::new("~F~ile", file_menu));
@@ -1896,15 +1814,27 @@ fn build_menu_bar(width: i16) -> MenuBar {
     menu_bar
 }
 
+fn status(
+    text: &str,
+    key: u16,
+    command: turbo_vision::core::command::CommandId,
+) -> turbo_vision::core::status_data::StatusItem {
+    StatusItemBuilder::new()
+        .text(text)
+        .key_code(key)
+        .command(command)
+        .build()
+}
+
 fn build_status_line(width: i16, height: i16) -> StatusLine {
     StatusLine::new(
         Rect::new(0, height - 1, width, height),
         vec![
-            StatusItem::new("~F5~ Debug", KB_F5, CM_DEBUG_START),
-            StatusItem::new("~F7~ Step", KB_F7, CM_DEBUG_STEP_INTO),
-            StatusItem::new("~F8~ Next", KB_F8, CM_DEBUG_STEP_OVER),
-            StatusItem::new("~F9~ Build", KB_F9, CM_BUILD),
-            StatusItem::new("~Alt-X~ Exit", KB_ALT_X, CM_QUIT),
+            status("~F5~ Debug", KB_F5, CM_DEBUG_START),
+            status("~F7~ Step", KB_F7, CM_DEBUG_STEP_INTO),
+            status("~F8~ Next", KB_F8, CM_DEBUG_STEP_OVER),
+            status("~F9~ Build", KB_F9, CM_BUILD),
+            status("~Alt-X~ Exit", KB_ALT_X, CM_QUIT),
         ],
     )
 }

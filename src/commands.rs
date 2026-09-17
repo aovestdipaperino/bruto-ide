@@ -45,6 +45,10 @@ pub const CM_DEBUG_EXITED: u16 = 423;
 /// Show About dialog
 pub const CM_ABOUT: u16 = 430;
 
+/// Internal: ends the build-progress modal when the background job
+/// finishes (as opposed to `CM_CANCEL` from the user's Cancel button).
+pub const CM_BUILD_DONE: u16 = 431;
+
 /// EditorWindow window close request (translated from CM_CLOSE by IdeEditorWindow
 /// so the IDE can show a save prompt before removing the editor).
 pub const CM_CLOSE_EDITOR: u16 = 440;

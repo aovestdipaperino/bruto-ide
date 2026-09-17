@@ -4,9 +4,8 @@ use turbo_vision::core::draw::DrawBuffer;
 use turbo_vision::core::event::{Event, EventType, MB_LEFT_BUTTON};
 use turbo_vision::core::geometry::Rect;
 use turbo_vision::core::palette::{Attr, TvColor};
-use turbo_vision::core::state::StateFlags;
 use turbo_vision::terminal::Terminal;
-use turbo_vision::views::view::{View, write_line_to_terminal};
+use turbo_vision::views::view::{View, ViewCore, write_line_to_terminal};
 
 const TEXT_ATTR: Attr = Attr::new(TvColor::Black, TvColor::LightGray);
 const IDX_ATTR: Attr = Attr::new(TvColor::Blue, TvColor::LightGray);
@@ -18,8 +17,7 @@ const HL_IDX_ATTR: Attr = Attr::new(TvColor::Blue, TvColor::Green);
 const HL_BG_ATTR: Attr = Attr::new(TvColor::Black, TvColor::Green);
 
 pub struct CallStackPanel {
-    bounds: Rect,
-    state: StateFlags,
+    core: ViewCore,
     frames: Vec<(usize, String)>,
     /// Frame index whose row should be drawn with the green highlight —
     /// either `#0` (the program counter just stopped here) or whichever
@@ -36,8 +34,7 @@ pub struct CallStackPanel {
 impl CallStackPanel {
     pub fn new(bounds: Rect) -> Self {
         Self {
-            bounds,
-            state: 0,
+            core: ViewCore::new(bounds),
             frames: Vec::new(),
             current_idx: None,
             pending_jump: None,
@@ -70,16 +67,23 @@ impl CallStackPanel {
 }
 
 impl View for CallStackPanel {
-    fn bounds(&self) -> Rect {
-        self.bounds
+    fn core(&self) -> &ViewCore {
+        &self.core
     }
-    fn set_bounds(&mut self, bounds: Rect) {
-        self.bounds = bounds;
+    fn core_mut(&mut self) -> &mut ViewCore {
+        &mut self.core
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 
     fn draw(&mut self, terminal: &mut Terminal) {
-        let width = self.bounds.width_clamped() as usize;
-        let height = self.bounds.height_clamped() as usize;
+        let extent = self.extent();
+        let width = extent.width_clamped() as usize;
+        let height = extent.height_clamped() as usize;
 
         for row in 0..height {
             let mut buf = DrawBuffer::new(width);
@@ -100,39 +104,23 @@ impl View for CallStackPanel {
                 buf.move_char(0, ' ', BG_ATTR, width);
             }
 
-            write_line_to_terminal(
-                terminal,
-                self.bounds.a.x,
-                self.bounds.a.y + row as i16,
-                &buf,
-            );
+            write_line_to_terminal(terminal, 0, row as i16, &buf);
         }
     }
 
     fn handle_event(&mut self, event: &mut Event) {
-        if event.what == EventType::MouseDown && (event.mouse.buttons & MB_LEFT_BUTTON != 0) {
-            let mx = event.mouse.pos.x;
-            let my = event.mouse.pos.y;
-            if mx >= self.bounds.a.x
-                && mx < self.bounds.b.x
-                && my >= self.bounds.a.y
-                && my < self.bounds.b.y
-            {
-                let row = (my - self.bounds.a.y) as usize;
-                if row < self.frames.len() {
-                    self.pending_jump = Some(row);
-                    event.clear();
-                }
+        if event.what == EventType::MouseDown
+            && (event.mouse.buttons & MB_LEFT_BUTTON != 0)
+            && self.extent().contains(event.mouse.pos)
+        {
+            let row = event.mouse.pos.y as usize;
+            if row < self.frames.len() {
+                self.pending_jump = Some(row);
+                event.clear();
             }
         }
     }
 
-    fn state(&self) -> StateFlags {
-        self.state
-    }
-    fn set_state(&mut self, state: StateFlags) {
-        self.state = state;
-    }
     fn get_palette(&self) -> Option<turbo_vision::core::palette::Palette> {
         None
     }
