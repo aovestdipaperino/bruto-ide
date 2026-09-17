@@ -306,9 +306,10 @@ pub fn run_with_options(
         callstack_interior_h,
     ))));
 
-    // ── Profile window (hidden at start). Same slot as the call stack;
-    // the user can drag either once shown.
-    let profile_bounds = callstack_bounds;
+    // ── Profile window (hidden at start). Lower right, wider than the
+    // call stack so the inclusive/exclusive columns fit; the user can
+    // drag/resize it once shown.
+    let profile_bounds = Rect::new((editor_right - 34).max(0), callstack_top, w, editor_bottom);
     let profile_panel = Rc::new(RefCell::new(ProfilePanel::new(Rect::new(
         0,
         0,

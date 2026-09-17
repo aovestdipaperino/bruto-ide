@@ -80,16 +80,44 @@ pub fn flatten_tree(profile: &Profile, collapsed: &HashSet<usize>) -> Vec<Row> {
     rows
 }
 
+/// Human-readable duration, at most 7 characters below 1000 s. The unit
+/// thresholds sit at 999.95 of the smaller unit so a value that would round
+/// up to "1000.0" is promoted to the next unit instead.
 fn fmt_ns(ns: u64) -> String {
-    if ns >= 1_000_000_000 {
+    if ns >= 999_950_000 {
         format!("{:.2}s", ns as f64 / 1e9)
-    } else if ns >= 1_000_000 {
+    } else if ns >= 999_950 {
         format!("{:.1}ms", ns as f64 / 1e6)
     } else if ns >= 1_000 {
         format!("{:.1}µs", ns as f64 / 1e3)
     } else {
         format!("{ns}ns")
     }
+}
+
+/// Rows reserve the top line for a column header.
+const HEADER_ROWS: usize = 1;
+
+/// The numeric block of one row: inclusive share and time, exclusive share
+/// and time, call count. Same widths as [`header_right`].
+fn format_right(incl_ns: u64, excl_ns: u64, calls: u64, total_ns: u64) -> String {
+    let total = total_ns.max(1) as f64;
+    format!(
+        "{:5.1}% {:>7} {:5.1}% {:>7} {:>6}",
+        incl_ns as f64 * 100.0 / total,
+        fmt_ns(incl_ns),
+        excl_ns as f64 * 100.0 / total,
+        fmt_ns(excl_ns),
+        calls
+    )
+}
+
+/// Header for the numeric block, aligned with [`format_right`].
+fn header_right() -> String {
+    format!(
+        "{:>6} {:>7} {:>6} {:>7} {:>6}",
+        "Incl%", "Incl", "Excl%", "Excl", "Calls"
+    )
 }
 
 /// Clip `left` so it fits within `label_max` characters, replacing the tail
@@ -187,7 +215,7 @@ impl ProfilePanel {
     }
 
     fn ensure_visible(&mut self) {
-        let h = self.extent().height_clamped() as usize;
+        let h = (self.extent().height_clamped() as usize).saturating_sub(HEADER_ROWS);
         if h == 0 {
             return;
         }
@@ -230,13 +258,35 @@ impl View for ProfilePanel {
             .map(|p| p.elapsed_ns.max(1))
             .unwrap_or(1);
 
-        for r in 0..height {
+        // Fixed header line: what the numeric columns mean.
+        if height > 0 {
             let mut buf = DrawBuffer::new(width);
-            let idx = self.top + r;
+            buf.move_char(0, ' ', BG_ATTR, width);
+            let mut title = "Routine / line".to_string();
+            let right = header_right();
+            let rlen = right.chars().count();
+            let label_max = if rlen + 1 < width {
+                width - rlen - 1
+            } else {
+                width
+            };
+            if title.chars().count() > label_max {
+                title = clip_label(&title, label_max);
+            }
+            buf.move_str(0, &title, NUM_ATTR);
+            if rlen + 1 < width {
+                buf.move_str(width - rlen, &right, NUM_ATTR);
+            }
+            write_line_to_terminal(terminal, 0, 0, &buf);
+        }
+
+        for r in HEADER_ROWS..height {
+            let mut buf = DrawBuffer::new(width);
+            let idx = self.top + r - HEADER_ROWS;
             let Some(row) = self.rows.get(idx) else {
                 buf.move_char(0, ' ', BG_ATTR, width);
-                if r == 0 && self.rows.is_empty() {
-                    buf.move_str(0, "No profile yet. Use Build > Profile.", TEXT_ATTR);
+                if r == HEADER_ROWS && self.rows.is_empty() {
+                    buf.move_str(0, "No profile yet. Use Debug > Profile.", TEXT_ATTR);
                 }
                 write_line_to_terminal(terminal, 0, r as i16, &buf);
                 continue;
@@ -262,13 +312,7 @@ impl View for ProfilePanel {
             };
             let mut left = format!("{}{}{}", " ".repeat(row.depth * 2), marker, label);
 
-            let pct = node.total_ns as f64 * 100.0 / total as f64;
-            let right = format!(
-                "{pct:5.1}%  {:>8}  {:>8}  {:>6}",
-                fmt_ns(node.total_ns),
-                fmt_ns(node.self_ns),
-                node.calls
-            );
+            let right = format_right(node.total_ns, node.self_ns, node.calls, total);
             let rlen = right.chars().count();
             let label_max = if rlen + 1 < width {
                 width - rlen - 1
@@ -306,8 +350,10 @@ impl View for ProfilePanel {
                 event.clear();
             }
             EventType::MouseDown if event.mouse.buttons & MB_LEFT_BUTTON != 0 => {
-                if self.extent().contains(event.mouse.pos) {
-                    let idx = self.top + event.mouse.pos.y as usize;
+                if self.extent().contains(event.mouse.pos)
+                    && event.mouse.pos.y as usize >= HEADER_ROWS
+                {
+                    let idx = self.top + event.mouse.pos.y as usize - HEADER_ROWS;
                     if idx < self.rows.len() {
                         self.selected = idx;
                         if event.mouse.double_click {
@@ -365,6 +411,24 @@ mod tests {
                 node(ProfileKind::Line, "", 11, Some(0), 50),         // 4
             ],
         }
+    }
+
+    #[test]
+    fn header_and_rows_share_one_width() {
+        let h = header_right();
+        for (incl, excl, calls, total) in [
+            (0u64, 0u64, 0u64, 1u64),
+            (1_000, 500, 1, 1_000),
+            (2_500_000_000, 999_999_999, 123_456, 2_500_000_000),
+            (999_950, 999_949, 7, 999_950),
+        ] {
+            let r = format_right(incl, excl, calls, total);
+            assert_eq!(r.chars().count(), h.chars().count(), "{r:?} vs {h:?}");
+        }
+        assert_eq!(
+            format_right(1_000, 250, 4, 1_000),
+            "100.0%   1.0µs  25.0%   250ns      4"
+        );
     }
 
     #[test]
