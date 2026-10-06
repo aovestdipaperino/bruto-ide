@@ -1,8 +1,10 @@
 #![allow(dead_code)]
 
+pub mod build_options_dialog;
 pub mod callstack_window;
 pub mod commands;
 pub mod debugger;
+pub mod disasm_window;
 pub mod gutter;
 pub mod heat;
 pub mod ide;

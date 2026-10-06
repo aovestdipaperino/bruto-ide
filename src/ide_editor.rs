@@ -77,6 +77,15 @@ pub struct IdeEditorWindow {
     /// Per-line timings from the last profile run. `None` until a profile
     /// run completes; cleared on the next build or when the text changes.
     line_profile: Option<LineProfile>,
+    /// Pascal source line correlated with the Disassembly window via a
+    /// double-click — distinct from `build_error` (red) and the debugger's
+    /// exec line (green). Drives a cyan row overlay in `draw()`; cleared
+    /// at the start of the next build (see `set_asm_correlate_line`).
+    asm_correlate_line: RefCell<Option<usize>>,
+    /// Set alongside `asm_correlate_line` on a double-click; drained once
+    /// by the IDE event loop (`take_pending_correlate_line`) to push the
+    /// line into the Disassembly window's own highlight.
+    pending_correlate_line: RefCell<Option<usize>>,
 }
 
 impl IdeEditorWindow {
@@ -147,6 +156,8 @@ impl IdeEditorWindow {
             indicator_idx,
             build_error: RefCell::new(None),
             line_profile: None,
+            asm_correlate_line: RefCell::new(None),
+            pending_correlate_line: RefCell::new(None),
         };
 
         ide_win.window.set_focus(true);
@@ -417,6 +428,20 @@ impl_view_for_window!(IdeEditorWindow {
             }
         }
 
+        // Overlay the Disassembly double-click correlation line (cyan),
+        // between the build-error (red) and exec-line (green) overlays —
+        // a live debug session's current statement is more relevant than
+        // a stale double-click, so exec_line still paints on top of this.
+        let correlate_line = *self.asm_correlate_line.borrow();
+        if let Some(correlate_line) = correlate_line
+            && correlate_line > scroll_y
+        {
+            let visible_row = (correlate_line - scroll_y - 1) as i16;
+            if visible_row >= 0 && visible_row < interior_h {
+                self.highlight_interior_row(terminal, visible_row, TvColor::Cyan);
+            }
+        }
+
         // Overlay execution line highlight on top of the editor area.
         // The gutter already shows ► but we also paint the entire line's
         // background green so the current statement is clearly visible.
@@ -465,6 +490,27 @@ impl_view_for_window!(IdeEditorWindow {
             }
         }
 
+        // A double-click on a source line correlates it with the
+        // Disassembly window — peek at the event without consuming it, so
+        // the editor's own double-click-selects-word behaviour (handled
+        // below by `self.window.handle_event`) still runs normally.
+        if event.what == EventType::MouseDown && event.mouse.double_click {
+            // Event position is window-relative (frame at 0); the editor
+            // sits at interior-relative `editor_bounds`, one cell inside.
+            let editor_bounds = self.editor.borrow().bounds();
+            let pos = event.mouse.pos;
+            let (ix, iy) = (pos.x - 1, pos.y - 1);
+            if ix >= editor_bounds.a.x
+                && ix < editor_bounds.b.x
+                && iy >= 0
+                && iy < editor_bounds.height()
+            {
+                let scroll_y = self.editor.borrow().get_delta().y.max(0) as usize;
+                let line = scroll_y + iy as usize + 1;
+                *self.asm_correlate_line.borrow_mut() = Some(line);
+                *self.pending_correlate_line.borrow_mut() = Some(line);
+            }
+        }
         let was_keyboard = event.what == EventType::Keyboard;
         self.window_handle_event(event);
 
@@ -689,6 +735,28 @@ impl IdeFileEditor for IdeEditorWindow {
 
     fn set_build_error(&mut self, err: Option<(usize, String)>) {
         *self.build_error.borrow_mut() = err;
+    }
+}
+
+impl IdeEditorWindow {
+    /// Line currently correlated with the Disassembly window (see the
+    /// double-click handling in `handle_event`). `&self` + `RefCell`
+    /// because callers typically only hold a shared borrow of the editor
+    /// (e.g. through `Rc<RefCell<IdeEditorWindow>>::borrow()`).
+    pub fn asm_correlate_line(&self) -> Option<usize> {
+        *self.asm_correlate_line.borrow()
+    }
+
+    /// Set (or clear) the correlated line directly — used to clear a
+    /// stale highlight at the start of a new build.
+    pub fn set_asm_correlate_line(&self, line: Option<usize>) {
+        *self.asm_correlate_line.borrow_mut() = line;
+    }
+
+    /// Drain the latest double-click target. Called by the IDE event
+    /// loop, which pushes it into the Disassembly window's own highlight.
+    pub fn take_pending_correlate_line(&self) -> Option<usize> {
+        self.pending_correlate_line.borrow_mut().take()
     }
 }
 

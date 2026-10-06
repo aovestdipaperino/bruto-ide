@@ -2,7 +2,6 @@
 ///
 /// turbo-vision core commands (CM_QUIT, CM_OPEN, CM_SAVE, etc.) are reused directly.
 /// These are IDE-specific commands in the safe range (400+).
-
 /// Build the current Pascal source file (F9)
 pub const CM_BUILD: u16 = 400;
 
@@ -11,6 +10,9 @@ pub const CM_RUN: u16 = 401;
 
 /// Build and then run (Shift+F9)
 pub const CM_BUILD_RUN: u16 = 402;
+
+/// Open the Build Options dialog (Debug/Retail, optimization goal)
+pub const CM_BUILD_OPTIONS: u16 = 403;
 
 /// Start or continue debugging (F5)
 pub const CM_DEBUG_START: u16 = 410;
@@ -70,3 +72,6 @@ pub const CM_SHOW_PROFILE: u16 = 451;
 
 /// Show or hide the per-line profile column in the focused editor
 pub const CM_TOGGLE_PROFILE_COLUMN: u16 = 452;
+
+/// Show / re-open the Disassembly window (hidden by default).
+pub const CM_SHOW_DISASSEMBLY: u16 = 444;
