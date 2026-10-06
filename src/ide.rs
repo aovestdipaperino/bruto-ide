@@ -8,11 +8,12 @@
 use crate::callstack_window::CallStackPanel;
 use crate::commands::*;
 use crate::debugger::{DebugEvent, Debugger, VarType};
+use crate::disasm_window::DisasmPanel;
 use crate::ide_editor::{IdeEditorWindow, SharedIdeEditorWindow};
 use crate::ide_file_editor::IdeFileEditor;
 use crate::output_panel::OutputPanel;
 use crate::watch_window::WatchPanel;
-use bruto_lang::language::{BuildPhase, BuildResult, Language};
+use bruto_lang::language::{BuildOptions, BuildPhase, BuildProfile, BuildResult, Language};
 
 use std::cell::RefCell;
 use std::path::Path;
@@ -59,6 +60,12 @@ pub struct IdeOptions {
     /// modal dialogs (update prompts, license confirmations, etc.). The
     /// framework knows nothing about its content.
     pub on_desktop_ready: Option<Box<dyn FnOnce(&mut Application)>>,
+    /// Compilation options the IDE starts with (Debug/Retail, optimization
+    /// goal). The host typically loads these from its config file.
+    pub build_options: BuildOptions,
+    /// Invoked whenever the user confirms new options in Build → Options…,
+    /// so the host can persist them.
+    pub on_build_options_changed: Option<Box<dyn FnMut(&BuildOptions)>>,
 }
 
 impl Default for IdeOptions {
@@ -68,6 +75,8 @@ impl Default for IdeOptions {
             on_about_shown: None,
             about_text: None,
             on_desktop_ready: None,
+            build_options: BuildOptions::default(),
+            on_build_options_changed: None,
         }
     }
 }
@@ -133,9 +142,27 @@ struct IdeState {
     output_term: Rc<RefCell<TerminalWidget>>,
     /// Shared Call Stack model — survives close/re-open so frames persist.
     callstack: Rc<RefCell<CallStackPanel>>,
+    /// Layout used to (re-)spawn the Disassembly window.
+    disasm_bounds: Rect,
+    /// Same idea as `callstack_win_id`, for the Disassembly window.
+    disasm_win_id: Option<turbo_vision::views::view::ViewId>,
+    /// Shared Disassembly model — survives close/re-open so the listing
+    /// persists until the next build.
+    disasm: Rc<RefCell<DisasmPanel>>,
+    /// Editor that produced the binary currently loaded (exe/source/asm
+    /// paths in this struct). Set at the end of every successful build —
+    /// the Disassembly window's click-to-source and click-to-toggle
+    /// actions always target this editor, since the compiled listing can
+    /// only ever describe the one file that was actually built.
+    built_editor: Option<Rc<RefCell<IdeEditorWindow>>>,
     /// Host-supplied About dialog body, taken from IdeOptions at startup.
     /// `None` means fall back to the generic Bruto IDE blurb.
     about_text: Option<String>,
+    /// Options used by Build / Run. Debug sessions always force a Debug
+    /// build so lldb has DWARF to work with.
+    build_options: BuildOptions,
+    /// Host hook fired after the user changes `build_options`.
+    on_build_options_changed: Option<Box<dyn FnMut(&BuildOptions)>>,
 }
 
 /// Wrap a fresh Watches `Window` around the shared [`WatchPanel`] and add it
@@ -191,6 +218,33 @@ fn install_callstack_window(
         turbo_vision::views::window::WindowPaletteType::Gray,
     );
     win.add(Box::new(CallStackView(Rc::clone(callstack))));
+    {
+        use turbo_vision::core::state::SF_SHADOW;
+        let state = win.state();
+        win.set_state(state & !SF_SHADOW);
+    }
+    app.desktop.add(Box::new(win))
+}
+
+/// Wrap a fresh "Disassembly" `Window` around the shared [`DisasmPanel`]
+/// and add it to the desktop. Mirrors [`install_callstack_window`].
+fn install_disasm_window(
+    app: &mut Application,
+    disasm_bounds: Rect,
+    disasm: &Rc<RefCell<DisasmPanel>>,
+) -> turbo_vision::views::view::ViewId {
+    let interior_w = disasm_bounds.width() - 2;
+    let interior_h = disasm_bounds.height() - 2;
+    disasm
+        .borrow_mut()
+        .set_bounds(Rect::new(0, 0, interior_w, interior_h));
+
+    let mut win = turbo_vision::views::window::Window::new_with_type(
+        disasm_bounds,
+        "Disassembly",
+        turbo_vision::views::window::WindowPaletteType::Gray,
+    );
+    win.add(Box::new(DisasmView(Rc::clone(disasm))));
     {
         use turbo_vision::core::state::SF_SHADOW;
         let state = win.state();
@@ -281,6 +335,20 @@ pub fn run_with_options(
         callstack_interior_h,
     ))));
 
+    // ── Disassembly (hidden at start). Assembly lines run long, so this
+    // defaults to the same full-width strip as Output rather than the
+    // narrow watch column; the two overlap when both are open, same as
+    // Watch/Call Stack already do — drag/resize as needed.
+    let disasm_bounds = Rect::new(0, editor_bottom, w, desktop_bottom);
+    let disasm_interior_w = disasm_bounds.width() - 2;
+    let disasm_interior_h = disasm_bounds.height() - 2;
+    let disasm = Rc::new(RefCell::new(DisasmPanel::new(Rect::new(
+        0,
+        0,
+        disasm_interior_w,
+        disasm_interior_h,
+    ))));
+
     let mut ide = IdeState {
         debugger: Debugger::new(),
         watch_vars: Vec::new(),
@@ -305,7 +373,13 @@ pub fn run_with_options(
         watch: Rc::clone(&watch),
         output_term: Rc::clone(&output_term),
         callstack: Rc::clone(&callstack),
+        disasm_bounds,
+        disasm_win_id: None,
+        disasm: Rc::clone(&disasm),
+        built_editor: None,
         about_text: options.about_text.take(),
+        build_options: options.build_options,
+        on_build_options_changed: options.on_build_options_changed.take(),
     };
 
     // ── Event loop ───────────────────────────────────────
@@ -436,6 +510,16 @@ pub fn run_with_options(
             cs.set_frames(ide.callstack_frames.clone());
             cs.set_current_idx(ide.current_frame_idx);
         }
+        {
+            let bp_lines: std::collections::HashSet<usize> = ide
+                .built_editor
+                .as_ref()
+                .map(|e| e.borrow().breakpoint_lines().into_iter().collect())
+                .unwrap_or_default();
+            let mut d = disasm.borrow_mut();
+            d.set_breakpoint_lines(bp_lines);
+            d.set_highlighted_line(ide.exec_line);
+        }
 
         // Prefer the editor that's actually being debugged: the green
         // exec-line bar must keep tracking the program counter even
@@ -561,6 +645,11 @@ pub fn run_with_options(
                         ide.callstack_win_id = None;
                     }
                 }
+                if let Some(id) = ide.disasm_win_id {
+                    if !app.desktop.contains_id(id) {
+                        ide.disasm_win_id = None;
+                    }
+                }
 
                 // Did the user just double-click a watch row? Open the
                 // type-aware value editor and push the result into lldb.
@@ -575,6 +664,27 @@ pub fn run_with_options(
                 let pending_jump = callstack.borrow_mut().take_pending_jump();
                 if let Some(row) = pending_jump {
                     handle_callstack_jump(&mut app, &mut ide, row);
+                }
+
+                let pending_disasm_jump = disasm.borrow_mut().take_pending_jump();
+                if let Some(idx) = pending_disasm_jump {
+                    handle_disasm_jump(&mut app, &mut ide, idx);
+                }
+                let pending_disasm_toggle = disasm.borrow_mut().take_pending_toggle();
+                if let Some(idx) = pending_disasm_toggle {
+                    handle_disasm_toggle_breakpoint(&mut ide, idx);
+                }
+
+                // A double-click in the built editor correlates that
+                // source line with the Disassembly window's highlight.
+                // Only `built_editor` is checked — that's the only editor
+                // whose line numbers the loaded listing actually describes.
+                if let Some(line) = ide
+                    .built_editor
+                    .as_ref()
+                    .and_then(|e| e.borrow().take_pending_correlate_line())
+                {
+                    disasm.borrow_mut().set_correlate_line(Some(line));
                 }
             }
             Ok(None) => {}
@@ -650,6 +760,13 @@ fn handle_command(
             }
             true
         }
+        CM_SHOW_DISASSEMBLY => {
+            if ide.disasm_win_id.is_none() {
+                let id = install_disasm_window(app, ide.disasm_bounds, &ide.disasm);
+                ide.disasm_win_id = Some(id);
+            }
+            true
+        }
         CM_UNDO => {
             if let Some(ed) = focused_editor(app) {
                 ed.borrow_mut().undo();
@@ -699,11 +816,31 @@ fn handle_command(
             true
         }
         CM_BUILD => {
-            handle_build(app, language, &mut output_rc.borrow_mut(), ide);
+            let opts = ide.build_options;
+            handle_build(app, language, &mut output_rc.borrow_mut(), ide, opts);
+            true
+        }
+        CM_BUILD_OPTIONS => {
+            if let Some(new_opts) =
+                crate::build_options_dialog::prompt_build_options(app, ide.build_options)
+            {
+                if new_opts != ide.build_options {
+                    ide.build_options = new_opts;
+                    if let Some(cb) = ide.on_build_options_changed.as_mut() {
+                        cb(&new_opts);
+                    }
+                }
+                append_output_line(
+                    &mut output_rc.borrow_mut(),
+                    &format!("Build options: {}", new_opts.describe()),
+                    Some(CONSOLE_INFO),
+                );
+            }
             true
         }
         CM_RUN => {
-            handle_build(app, language, &mut output_rc.borrow_mut(), ide);
+            let opts = ide.build_options;
+            handle_build(app, language, &mut output_rc.borrow_mut(), ide, opts);
             if let Some(exe) = ide.exe_path.clone() {
                 handle_run(&exe, &ide.console_capture_path, &mut output_rc.borrow_mut());
             }
@@ -886,6 +1023,7 @@ fn handle_build(
     language: &Box<dyn Language>,
     output: &mut TerminalWidget,
     ide: &mut IdeState,
+    build_options: BuildOptions,
 ) {
     let Some(editor) = focused_editor(app) else {
         append_output_line(
@@ -905,21 +1043,35 @@ fn handle_build(
         ide.debug_editor.is_some()
     );
     output.clear();
-    append_output_line(output, "Building...", Some(CONSOLE_INFO));
+    append_output_line(
+        output,
+        &format!("Building ({})...", build_options.describe()),
+        Some(CONSOLE_INFO),
+    );
 
     // Drop any prior error highlight before we start; we'll re-set it
     // below if this build fails too. Each build is the authoritative
     // signal — leaving a stale red bar around after a successful build
     // would mislead the user.
     editor.borrow_mut().set_build_error(None);
+    // Same reasoning for a stale double-click correlation — it points at
+    // the old listing, which `ide.disasm.clear()` below is about to drop.
+    editor.borrow().set_asm_correlate_line(None);
 
-    let job = language.build_job_at(&source, file_path.as_deref());
+    // Forget the previous binary up front so a failed or cancelled build
+    // can't leave Run / Debug pointing at an exe built with other options.
+    ide.exe_path = None;
+    ide.disasm.borrow_mut().clear();
+    let job = language.build_job_with(&source, file_path.as_deref(), &build_options);
     match run_build_with_progress(app, job) {
         Some(Ok(result)) => {
             crate::trace_log!("handle_build: ok exe={}", result.exe_path);
             ide.exe_path = Some(result.exe_path.clone());
             ide.source_path = Some(result.source_path);
             ide.console_capture_path = Some(result.console_capture_path);
+            ide.built_editor = Some(Rc::clone(&editor));
+            let (asm_lines, asm_notice) = load_disasm(&result.asm_path, build_options.profile);
+            ide.disasm.borrow_mut().set_lines(asm_lines, asm_notice);
             append_output_line(
                 output,
                 &format!("Build successful: {}", result.exe_path),
@@ -942,6 +1094,81 @@ fn handle_build(
             append_output_line(output, "Build cancelled.", Some(CONSOLE_INFO));
         }
     }
+}
+
+/// Read and parse the `.s` listing a successful build produced, pairing
+/// it with a one-line notice when the listing has no (or only partial)
+/// Pascal source mapping — Retail builds strip debug info before
+/// emitting assembly, so `.loc` directives (and therefore click-to-source
+/// / click-to-breakpoint in the Disassembly window) aren't available.
+fn load_disasm(
+    asm_path: &Option<String>,
+    profile: bruto_lang::language::BuildProfile,
+) -> (Vec<bruto_lang::disasm::AsmLine>, Option<String>) {
+    let Some(path) = asm_path else {
+        return (
+            Vec::new(),
+            Some("Assembly listing unavailable for this target.".to_string()),
+        );
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return (
+            Vec::new(),
+            Some("Could not read the assembly listing.".to_string()),
+        );
+    };
+    let lines = bruto_lang::disasm::parse(&text);
+    let notice = (profile == BuildProfile::Retail)
+        .then(|| "Retail build — no Pascal source mapping; click does nothing.".to_string());
+    (lines, notice)
+}
+
+/// Navigate `ide.built_editor` (the editor that produced the currently
+/// loaded binary — see [`IdeState::built_editor`]) to the Pascal source
+/// line mapped to disassembly row `idx`, focusing that editor window.
+/// No-op if the row has no mapping (Retail build, or compiler-generated
+/// code with no source counterpart) or the editor isn't open any more.
+fn handle_disasm_jump(app: &mut Application, ide: &mut IdeState, idx: usize) {
+    let Some(line) = ide.disasm.borrow().source_line_at(idx) else {
+        return;
+    };
+    let Some(editor) = ide.built_editor.clone() else {
+        return;
+    };
+    for i in 0..app.desktop.child_count() {
+        if let Some(shared) = app
+            .desktop
+            .child_at(i)
+            .as_any()
+            .downcast_ref::<SharedIdeEditorWindow>()
+        {
+            let is_target = Rc::ptr_eq(&shared.0, &editor);
+            app.desktop.child_at_mut(i).set_focus(is_target);
+        }
+    }
+    let editor_inner = editor.borrow().editor_rc();
+    editor_inner
+        .borrow_mut()
+        .scroll_to_line(line.saturating_sub(1));
+}
+
+/// Toggle a breakpoint on `ide.built_editor`'s gutter at the Pascal source
+/// line mapped to disassembly row `idx` — the same mechanism as clicking
+/// the editor's own gutter. If a debug session is running, the next tick's
+/// `sync_debug_breakpoints` picks up the change automatically. No-op if
+/// the row has no mapping or the editor isn't open any more.
+fn handle_disasm_toggle_breakpoint(ide: &mut IdeState, idx: usize) {
+    let Some(line) = ide.disasm.borrow().source_line_at(idx) else {
+        return;
+    };
+    let Some(editor) = ide.built_editor.clone() else {
+        return;
+    };
+    editor
+        .borrow()
+        .gutter_rc()
+        .borrow_mut()
+        .toggle_breakpoint(line);
 }
 
 /// Pull a 1-based line number out of a build-error string. Pascal's
@@ -1163,7 +1390,17 @@ fn handle_debug_start_continue(
         return;
     }
 
-    handle_build(app, language, output, ide);
+    // lldb needs DWARF: debug sessions always use a Debug build, whatever
+    // the Build Options say.
+    let opts = ide.build_options.for_debugging();
+    if opts != ide.build_options {
+        append_output_line(
+            output,
+            "Retail build selected — debugging with a Debug build instead.",
+            Some(CONSOLE_INFO),
+        );
+    }
+    handle_build(app, language, output, ide, opts);
     let Some(exe_path) = ide.exe_path.clone() else {
         append_output_line(output, "No executable to debug.", Some(ERROR));
         return;
@@ -1274,6 +1511,10 @@ fn update_command_states(app: &mut Application, ide: &IdeState) {
     let watch_open = ide.watch_win_id.is_some();
     let output_open = ide.output_win_id.is_some();
     let callstack_open = ide.callstack_win_id.is_some();
+    let disasm_open = ide.disasm_win_id.is_some();
+    // Cleared at the start of every build and only set again on success —
+    // exactly "there's a current build to show the assembly of".
+    let has_build = ide.exe_path.is_some();
 
     let toggle = |cmd: u16, enabled: bool| {
         if enabled {
@@ -1316,6 +1557,7 @@ fn update_command_states(app: &mut Application, ide: &IdeState) {
     toggle(CM_SHOW_WATCHES, !watch_open);
     toggle(CM_SHOW_OUTPUT, !output_open);
     toggle(CM_SHOW_CALLSTACK, !callstack_open);
+    toggle(CM_SHOW_DISASSEMBLY, !disasm_open && has_build);
 }
 
 /// Show the latest build error in the status line whenever the caret
@@ -1841,6 +2083,35 @@ impl View for CallStackView {
     }
 }
 
+struct DisasmView(Rc<RefCell<DisasmPanel>>);
+
+impl View for DisasmView {
+    fn bounds(&self) -> Rect {
+        self.0.borrow().bounds()
+    }
+    fn set_bounds(&mut self, b: Rect) {
+        self.0.borrow_mut().set_bounds(b);
+    }
+    fn draw(&mut self, t: &mut turbo_vision::terminal::Terminal) {
+        self.0.borrow_mut().draw(t);
+    }
+    fn handle_event(&mut self, e: &mut Event) {
+        self.0.borrow_mut().handle_event(e);
+    }
+    fn can_focus(&self) -> bool {
+        self.0.borrow().can_focus()
+    }
+    fn state(&self) -> turbo_vision::core::state::StateFlags {
+        self.0.borrow().state()
+    }
+    fn set_state(&mut self, s: turbo_vision::core::state::StateFlags) {
+        self.0.borrow_mut().set_state(s);
+    }
+    fn get_palette(&self) -> Option<turbo_vision::core::palette::Palette> {
+        None
+    }
+}
+
 // ── Menu and status bar ──────────────────────────────────
 
 fn build_menu_bar(width: i16) -> MenuBar {
@@ -1865,6 +2136,8 @@ fn build_menu_bar(width: i16) -> MenuBar {
     let build_menu = Menu::from_items(vec![
         MenuItem::with_shortcut("~B~uild", CM_BUILD, KB_F9, "F9", 0),
         MenuItem::with_shortcut("~R~un", CM_RUN, 0, "Ctrl-F9", 0),
+        MenuItem::separator(),
+        MenuItem::with_shortcut("~O~ptions...", CM_BUILD_OPTIONS, 0, "", 0),
     ]);
     let debug_menu = Menu::from_items(vec![
         MenuItem::with_shortcut("~S~tart / Continue", CM_DEBUG_START, KB_F5, "F5", 0),
@@ -1877,6 +2150,7 @@ fn build_menu_bar(width: i16) -> MenuBar {
         MenuItem::with_shortcut("~W~atches", CM_SHOW_WATCHES, 0, "", 0),
         MenuItem::with_shortcut("~O~utput", CM_SHOW_OUTPUT, 0, "", 0),
         MenuItem::with_shortcut("~C~all Stack", CM_SHOW_CALLSTACK, 0, "", 0),
+        MenuItem::with_shortcut("~D~isassembly", CM_SHOW_DISASSEMBLY, 0, "", 0),
     ]);
     let about_menu = Menu::from_items(vec![MenuItem::with_shortcut(
         "~A~bout...",

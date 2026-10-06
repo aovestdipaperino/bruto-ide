@@ -12,6 +12,9 @@ pub const CM_RUN: u16 = 401;
 /// Build and then run (Shift+F9)
 pub const CM_BUILD_RUN: u16 = 402;
 
+/// Open the Build Options dialog (Debug/Retail, optimization goal)
+pub const CM_BUILD_OPTIONS: u16 = 403;
+
 /// Start or continue debugging (F5)
 pub const CM_DEBUG_START: u16 = 410;
 
@@ -57,3 +60,6 @@ pub const CM_SHOW_OUTPUT: u16 = 442;
 
 /// Show / re-open the Call Stack window (hidden by default).
 pub const CM_SHOW_CALLSTACK: u16 = 443;
+
+/// Show / re-open the Disassembly window (hidden by default).
+pub const CM_SHOW_DISASSEMBLY: u16 = 444;
