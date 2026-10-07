@@ -20,6 +20,7 @@ use turbo_vision::core::state::Options;
 use turbo_vision::terminal::Terminal;
 use turbo_vision::views::View;
 use turbo_vision::views::button::Button;
+use turbo_vision::views::checkbox::CheckBox;
 use turbo_vision::views::dialog::Dialog;
 use turbo_vision::views::group::GroupLike;
 use turbo_vision::views::label::Label;
@@ -34,7 +35,7 @@ const GOALS: [OptimizeFor; 3] = [OptimizeFor::Size, OptimizeFor::Both, OptimizeF
 pub fn prompt_build_options(app: &mut Application, current: BuildOptions) -> Option<BuildOptions> {
     let (tw, th) = app.terminal.size();
     let dw = 48i16.min(tw - 4);
-    let dh = 12i16;
+    let dh = 14i16;
     let x = ((tw) - dw) / 2;
     let y = ((th) - dh) / 2;
     let mut dialog = Dialog::new(Rect::new(x, y, x + dw, y + dh), "Build Options");
@@ -61,9 +62,17 @@ pub fn prompt_build_options(app: &mut Application, current: BuildOptions) -> Opt
     goal_label.set_link(goal_id);
     dialog.add(goal_label);
 
+    let obfuscate = dialog.add_typed(CheckBox::new(
+        Rect::new(2, 5, dw - 2, 6),
+        "Obfuscate ~c~ode",
+    ));
+    if let Some(cb) = dialog.group_mut().get_mut::<CheckBox>(obfuscate) {
+        cb.set_checked(current.obfuscate);
+    }
+
     dialog.add(StaticText::new(
         Rect::new(2, 6, dw - 2, 7),
-        "Optimization applies to Retail builds only.",
+        "Optimization applies to Retail builds only; obfuscation to any.",
     ));
 
     dialog.add(Button::new(
@@ -83,9 +92,15 @@ pub fn prompt_build_options(app: &mut Application, current: BuildOptions) -> Opt
     if dialog.execute(app) != CM_OK {
         return None;
     }
+    let obfuscate = dialog
+        .group_mut()
+        .get_mut::<CheckBox>(obfuscate)
+        .map(|cb| cb.is_checked())
+        .unwrap_or(false);
     Some(BuildOptions {
         profile: PROFILES[profile.get()],
         optimize: GOALS[goal.get()],
+        obfuscate,
     })
 }
 
@@ -219,6 +234,17 @@ impl View for RadioGroup {
 mod tests {
     use super::*;
     use turbo_vision::core::event::Event;
+    use turbo_vision::views::checkbox::CheckBox;
+
+    #[test]
+    fn checkbox_state_read_back_after_add_typed() {
+        let mut dialog = Dialog::new(Rect::new(0, 0, 40, 10), "Build Options");
+        let handle = dialog.add_typed(CheckBox::new(Rect::new(2, 2, 20, 3), "Obfuscate code"));
+        let cb = dialog.group_mut().get_mut::<CheckBox>(handle).unwrap();
+        assert!(!cb.is_checked());
+        cb.toggle();
+        assert!(cb.is_checked());
+    }
 
     fn group(selected: usize) -> (RadioGroup, Rc<Cell<usize>>) {
         let cell = Rc::new(Cell::new(selected));

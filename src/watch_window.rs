@@ -4,6 +4,7 @@ use turbo_vision::core::draw::DrawBuffer;
 use turbo_vision::core::event::{Event, EventType, MB_LEFT_BUTTON};
 use turbo_vision::core::geometry::Rect;
 use turbo_vision::core::palette::{Attr, TvColor};
+use turbo_vision::core::state::Grow;
 use turbo_vision::terminal::Terminal;
 use turbo_vision::views::view::{View, ViewCore, write_line_to_terminal};
 
@@ -26,8 +27,11 @@ pub struct WatchPanel {
 
 impl WatchPanel {
     pub fn new(bounds: Rect) -> Self {
+        let mut core = ViewCore::new(bounds);
+        // Stretch with the window's interior when it is resized or zoomed.
+        core.grow_mode = Grow::HI_X | Grow::HI_Y;
         Self {
-            core: ViewCore::new(bounds),
+            core,
             variables: Vec::new(),
             pending_edit: None,
         }
@@ -103,5 +107,16 @@ impl View for WatchPanel {
     }
     fn get_palette(&self) -> Option<turbo_vision::core::palette::Palette> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn panel_stretches_with_its_window() {
+        let p = WatchPanel::new(Rect::new(0, 0, 10, 5));
+        assert_eq!(p.grow_mode(), Grow::HI_X | Grow::HI_Y);
     }
 }

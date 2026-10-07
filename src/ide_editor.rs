@@ -689,6 +689,7 @@ impl FileEditor for IdeEditorWindow {
             .title("Save As")
             .wildcard(self.save_wildcard.clone())
             .button_label("~S~ave")
+            .hidden_toggle(true)
             .build();
         match dialog.execute(app) {
             Some(path) => self.save_as(path).is_ok(),

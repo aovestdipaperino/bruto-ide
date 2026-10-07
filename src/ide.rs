@@ -43,7 +43,7 @@ use turbo_vision::views::menu_bar::{MenuBar, SubMenu};
 use turbo_vision::views::msgbox::{MsgBox, message_box};
 use turbo_vision::views::shared::Shared;
 use turbo_vision::views::status_line::StatusLine;
-use turbo_vision::views::terminal_widget::TerminalWidget;
+use crate::terminal_widget::TerminalWidget;
 use turbo_vision::views::view::{ViewCore, dispatch_to_child};
 
 /// Host-application hooks that influence first-run behaviour. The IDE itself
@@ -435,6 +435,13 @@ pub fn run_with_options(
             app.terminal.draw_view(sl);
         }
         let _ = app.terminal.flush();
+        // The editor paints its own caret cell, so the hardware cursor must
+        // stay hidden here; otherwise it trails each diff-render's cursor
+        // moves and flickers across the screen on every redraw (most
+        // visibly while the mouse streams move events). Re-hidden every
+        // frame because modal dialogs (`execute_modal`) show it for their
+        // input lines and don't hide it on the way out.
+        let _ = app.terminal.hide_cursor();
 
         if pending_about {
             pending_about = false;
@@ -721,6 +728,10 @@ pub fn run_with_options(
                 let profile_jump = profile_panel.borrow_mut().take_pending_jump();
                 if let Some(line) = profile_jump {
                     handle_profile_jump(&mut app, &mut ide, line);
+                }
+                let profile_correlate = profile_panel.borrow_mut().take_pending_correlate();
+                if let Some(line) = profile_correlate {
+                    handle_profile_correlate(&mut ide, line);
                 }
 
                 let pending_disasm_jump = disasm.borrow_mut().take_pending_jump();
@@ -1013,6 +1024,7 @@ fn handle_open(app: &mut Application, language: &Box<dyn Language>, ide: &IdeSta
         .title("Open File")
         .wildcard(ide.save_wildcard.clone())
         .button_label("~O~pen")
+        .hidden_toggle(true)
         .build();
     let Some(path) = dialog.execute(app) else {
         crate::trace_log!("handle_open: cancelled");
@@ -1072,6 +1084,7 @@ fn save_focused_as(app: &mut Application, editor: &Rc<RefCell<IdeEditorWindow>>,
         .title("Save As")
         .wildcard(ide.save_wildcard.clone())
         .button_label("~S~ave")
+        .hidden_toggle(true)
         .build();
     let Some(path) = dialog.execute(app) else {
         return;
@@ -1150,7 +1163,9 @@ fn handle_build(
             ide.console_capture_path = Some(result.console_capture_path);
             ide.built_editor = Some(Rc::clone(&editor));
             let (asm_lines, asm_notice) = load_disasm(&result.asm_path, build_options.profile);
-            ide.disasm.borrow_mut().set_lines(asm_lines, asm_notice);
+            ide.disasm
+                .borrow_mut()
+                .set_lines(asm_lines, &source, asm_notice);
             append_output_line(
                 output,
                 &format!("Build successful: {}", result.exe_path),
@@ -1335,9 +1350,9 @@ fn run_build_with_progress(
         }
     });
 
-    // Show cursor again before we hand back to the main event loop;
-    // its update_cursor will reposition it to whatever's focused now.
-    let _ = app.terminal.show_cursor(0, 0);
+    // Leave the hardware cursor hidden: the main loop never positions it
+    // (the editor paints its own caret cell), so showing it here parked a
+    // visible cursor that every redraw then dragged across the screen.
     outcome
 }
 
@@ -1581,6 +1596,31 @@ fn handle_profile_jump(app: &mut Application, ide: &mut IdeState, line: usize) {
         .editor_rc()
         .borrow_mut()
         .scroll_to_line(line.saturating_sub(1));
+}
+
+/// Give Pascal line `line` the cyan correlation highlight after a click
+/// in the Profile tree — the same highlight a double-click on the source
+/// line produces. The profiled editor is scrolled to the line without
+/// taking focus from the Profile window, and the Disassembly window
+/// follows when its listing was built from that same editor (its line
+/// numbers describe no other file).
+fn handle_profile_correlate(ide: &mut IdeState, line: usize) {
+    let Some(editor) = ide.profile_editor.clone() else {
+        return;
+    };
+    editor.borrow().set_asm_correlate_line(Some(line));
+    editor
+        .borrow()
+        .editor_rc()
+        .borrow_mut()
+        .scroll_to_line(line.saturating_sub(1));
+    if ide
+        .built_editor
+        .as_ref()
+        .is_some_and(|b| Rc::ptr_eq(b, &editor))
+    {
+        ide.disasm.borrow_mut().set_correlate_line(Some(line));
+    }
 }
 
 fn handle_debug_start_continue(

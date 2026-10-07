@@ -1,6 +1,6 @@
 [package]
 name = "bruto-ide"
-version = "1.0.2"
+version = "1.0.3"
 edition = "2024"
 authors = ["Enzo Lombardi <enzinol@gmail.com>"]
 repository = "https://github.com/aovestdipaperino/bruto-ide"
@@ -9,7 +9,7 @@ license = "MIT"
 readme = "README.md"
 
 [dependencies]
-bruto-lang = "1.0.2"
-turbo-vision = "3.0"
+bruto-lang = "1.0.3"
+turbo-vision = "4.0.3"
 # Same version turbo-vision uses; needed only for KeyModifiers in the Shift-F9 check.
 crossterm = "0.29"

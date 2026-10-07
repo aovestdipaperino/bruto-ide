@@ -11,7 +11,7 @@ use turbo_vision::core::event::{
 };
 use turbo_vision::core::geometry::Rect;
 use turbo_vision::core::palette::{Attr, TvColor};
-use turbo_vision::core::state::Options;
+use turbo_vision::core::state::{Grow, Options};
 use turbo_vision::terminal::Terminal;
 use turbo_vision::views::view::{View, ViewCore, write_line_to_terminal};
 
@@ -144,12 +144,18 @@ pub struct ProfilePanel {
     selected: usize,
     top: usize,
     pending_jump: Option<usize>,
+    /// Source line of the row last clicked, drained by the IDE event loop
+    /// to give that line the cyan correlation highlight in the editor and
+    /// the Disassembly window (as double-clicking a source line does).
+    pending_correlate: Option<usize>,
 }
 
 impl ProfilePanel {
     pub fn new(bounds: Rect) -> Self {
         let mut core = ViewCore::new(bounds);
         core.options |= Options::SELECTABLE;
+        // Stretch with the window's interior when it is resized or zoomed.
+        core.grow_mode = Grow::HI_X | Grow::HI_Y;
         Self {
             core,
             profile: None,
@@ -158,6 +164,7 @@ impl ProfilePanel {
             selected: 0,
             top: 0,
             pending_jump: None,
+            pending_correlate: None,
         }
     }
 
@@ -187,6 +194,11 @@ impl ProfilePanel {
     /// Drain the latest jump request (a 1-based source line).
     pub fn take_pending_jump(&mut self) -> Option<usize> {
         self.pending_jump.take()
+    }
+
+    /// Drain the latest correlation request (a 1-based source line).
+    pub fn take_pending_correlate(&mut self) -> Option<usize> {
+        self.pending_correlate.take()
     }
 
     fn rebuild(&mut self) {
@@ -219,6 +231,9 @@ impl ProfilePanel {
         if h == 0 {
             return;
         }
+        // Growing the window can leave `top` past the last full page;
+        // pull it back so the extra rows show the tree, not blank space.
+        self.top = self.top.min(self.rows.len().saturating_sub(h));
         if self.selected < self.top {
             self.top = self.selected;
         } else if self.selected >= self.top + h {
@@ -356,6 +371,7 @@ impl View for ProfilePanel {
                     let idx = self.top + event.mouse.pos.y as usize - HEADER_ROWS;
                     if idx < self.rows.len() {
                         self.selected = idx;
+                        self.pending_correlate = self.selected_line();
                         if event.mouse.double_click {
                             self.request_jump();
                         }
@@ -489,6 +505,25 @@ mod tests {
     }
 
     #[test]
+    fn clicking_a_row_requests_correlation_of_its_line() {
+        use turbo_vision::core::event::{Event, EventType, MB_LEFT_BUTTON};
+        use turbo_vision::core::geometry::{Point, Rect};
+        let mut panel = ProfilePanel::new(Rect::new(0, 0, 40, 10));
+        panel.set_profile(Some(sample()));
+        let y = (HEADER_ROWS + 1) as i16; // second row: Work, line 3
+        let mut click = Event::mouse(
+            EventType::MouseDown,
+            Point { x: 2, y },
+            MB_LEFT_BUTTON,
+            false,
+        );
+        panel.handle_event(&mut click);
+        assert_eq!(panel.take_pending_correlate(), Some(3));
+        assert_eq!(panel.take_pending_correlate(), None);
+        assert_eq!(panel.take_pending_jump(), None, "single click doesn't jump");
+    }
+
+    #[test]
     fn long_labels_are_clipped_before_the_numbers() {
         assert_eq!(clip_label("AAAAAAAA", 5), "AAAA…");
         assert_eq!(clip_label("AB", 5), "AB");
@@ -523,5 +558,11 @@ mod tests {
         assert!(clipped.ends_with('…'));
         assert!(clipped.chars().count() <= label_max);
         assert_eq!(panel.row_count(), 1);
+    }
+
+    #[test]
+    fn panel_stretches_with_its_window() {
+        let p = ProfilePanel::new(Rect::new(0, 0, 10, 5));
+        assert_eq!(p.grow_mode(), Grow::HI_X | Grow::HI_Y);
     }
 }
