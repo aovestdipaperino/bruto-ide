@@ -13,6 +13,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::terminal_widget::TerminalWidget;
 use turbo_vision::core::geometry::Rect;
 use turbo_vision::core::state::State;
 use turbo_vision::impl_view_for_window;
@@ -20,7 +21,6 @@ use turbo_vision::terminal::Terminal;
 use turbo_vision::views::group::{Group, GroupLike};
 use turbo_vision::views::scrollbar::ScrollBar;
 use turbo_vision::views::shared::Shared;
-use crate::terminal_widget::TerminalWidget;
 use turbo_vision::views::view::View;
 use turbo_vision::views::window::{Window, WindowLike};
 

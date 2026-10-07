@@ -22,6 +22,7 @@ use std::path::Path;
 use std::rc::Rc;
 use std::time::Duration;
 
+use crate::terminal_widget::TerminalWidget;
 use turbo_vision::app::Application;
 use turbo_vision::core::command::{
     CM_CLOSE, CM_COPY, CM_CUT, CM_NEW, CM_NO, CM_OPEN, CM_PASTE, CM_QUIT, CM_REDO, CM_SAVE,
@@ -43,7 +44,6 @@ use turbo_vision::views::menu_bar::{MenuBar, SubMenu};
 use turbo_vision::views::msgbox::{MsgBox, message_box};
 use turbo_vision::views::shared::Shared;
 use turbo_vision::views::status_line::StatusLine;
-use crate::terminal_widget::TerminalWidget;
 use turbo_vision::views::view::{ViewCore, dispatch_to_child};
 
 /// Host-application hooks that influence first-run behaviour. The IDE itself

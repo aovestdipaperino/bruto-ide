@@ -24,14 +24,16 @@
 //! - Optional ANSI color code support
 //! - Read-only (unlike EditorWindow)
 
-use turbo_vision::views::scrollbar::ScrollBar;
-use turbo_vision::views::view::{View, ViewCore, write_line_to_terminal};
 use turbo_vision::core::draw::DrawBuffer;
-use turbo_vision::core::event::{Event, EventType, KB_DOWN, KB_END, KB_HOME, KB_PGDN, KB_PGUP, KB_UP};
+use turbo_vision::core::event::{
+    Event, EventType, KB_DOWN, KB_END, KB_HOME, KB_PGDN, KB_PGUP, KB_UP,
+};
 use turbo_vision::core::geometry::Rect;
 use turbo_vision::core::palette::Attr;
 use turbo_vision::core::state::State;
 use turbo_vision::terminal::Terminal;
+use turbo_vision::views::scrollbar::ScrollBar;
+use turbo_vision::views::view::{View, ViewCore, write_line_to_terminal};
 
 /// A line of output with optional color attributes
 #[derive(Clone, Debug)]
@@ -358,12 +360,7 @@ impl View for TerminalWidget {
                 buf.move_char(0, ' ', default_color, visible_width);
             }
 
-            write_line_to_terminal(
-                terminal,
-                0,
-                i as i16,
-                &buf,
-            );
+            write_line_to_terminal(terminal, 0, i as i16, &buf);
         }
 
         // Draw scrollbar if present
