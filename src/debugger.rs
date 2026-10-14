@@ -121,6 +121,11 @@ fn console_file() -> String {
 pub enum VarMeta {
     Enum(Vec<String>), // values in ordinal order
     Set,               // 4-word bitmask
+    /// An 8-bit integer (`Byte` / `ShortInt`), which lldb prints as a C
+    /// char literal.
+    Int8 {
+        signed: bool,
+    },
     VariantRecord {
         // tag + cases
         tag_name: Option<String>,
@@ -184,6 +189,9 @@ impl Debugger {
             let meta = match kind {
                 "enum" => VarMeta::Enum(extra.split(',').map(|s| s.to_string()).collect()),
                 "set" => VarMeta::Set,
+                "int8" => VarMeta::Int8 {
+                    signed: extra == "s",
+                },
                 "vrec" => parse_vrec(extra),
                 _ => continue,
             };
@@ -389,7 +397,7 @@ impl Debugger {
     pub fn set_variable(&mut self, name: &str, expr_value: &str) -> Result<(), String> {
         self.send_command(&format!("expr {name} = {expr_value}"))?;
         self.pending_var_request = true;
-        self.send_command("frame variable")?;
+        self.send_command("frame variable -g")?;
         Ok(())
     }
 
@@ -531,7 +539,15 @@ impl Debugger {
                 if let Some((name, mut value, type_str)) = parse_variable_line(&line) {
                     // Override with Pascal-aware metadata if we have it.
                     if let Some(meta) = self.var_meta.get(&name) {
-                        if let Some(formatted) = format_with_meta(meta, &value) {
+                        // 8-bit integers decode lldb's own char literal, not
+                        // the char/bool rendering applied above.
+                        let source = match meta {
+                            VarMeta::Int8 { .. } => {
+                                raw_variable_value(&line).unwrap_or_else(|| value.clone())
+                            }
+                            _ => value.clone(),
+                        };
+                        if let Some(formatted) = format_with_meta(meta, &source) {
                             value = formatted;
                         }
                     }
@@ -552,7 +568,7 @@ impl Debugger {
         }
 
         if needs_var_request {
-            let _ = self.send_command("frame variable");
+            let _ = self.send_command("frame variable -g");
             // Refresh the call-stack panel: `bt` prints `frame #0..N` which
             // poll() parses into DebugEvent::Frames events on the next tick.
             let _ = self.send_command("bt");
@@ -638,6 +654,13 @@ fn parse_variable_line(line: &str) -> Option<(String, String, String)> {
 
     let value = format_variable_value(type_str, &raw_value);
     Some((name, value, type_str.to_string()))
+}
+
+/// The unformatted value part of an lldb `(type) name = value` line.
+fn raw_variable_value(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    let rest = &trimmed[trimmed.find(") ")? + 2..];
+    Some(rest[rest.find(" = ")? + 3..].trim().to_string())
 }
 
 /// Format a variable value for the watch window based on its lldb type.
@@ -781,6 +804,42 @@ fn parse_vrec(body: &str) -> VarMeta {
     }
 }
 
+/// The byte value of a C char literal as lldb prints it: `'A'`, `'\n'`,
+/// `'\0'`, `'\xc8'`. Also accepts a plain number.
+fn parse_c_char_literal(raw: &str) -> Option<u8> {
+    let raw = raw.trim();
+    if let Ok(n) = raw.parse::<i64>() {
+        return Some(n as u8);
+    }
+    let inner = raw.strip_prefix('\'')?.strip_suffix('\'')?;
+    let Some(esc) = inner.strip_prefix('\\') else {
+        let mut chars = inner.chars();
+        let c = chars.next()?;
+        return (chars.next().is_none() && c.is_ascii()).then_some(c as u8);
+    };
+    Some(match esc {
+        "0" => 0,
+        "a" => 7,
+        "b" => 8,
+        "t" => 9,
+        "n" => 10,
+        "v" => 11,
+        "f" => 12,
+        "r" => 13,
+        "e" => 27,
+        "\\" => b'\\',
+        "'" => b'\'',
+        "\"" => b'"',
+        _ => {
+            if let Some(hex) = esc.strip_prefix('x') {
+                u8::from_str_radix(hex, 16).ok()?
+            } else {
+                u8::from_str_radix(esc, 8).ok()?
+            }
+        }
+    })
+}
+
 /// Apply Pascal-aware formatting to an lldb-formatted value.
 fn format_with_meta(meta: &VarMeta, raw: &str) -> Option<String> {
     match meta {
@@ -792,6 +851,14 @@ fn format_with_meta(meta: &VarMeta, raw: &str) -> Option<String> {
             } else {
                 None
             }
+        }
+        VarMeta::Int8 { signed } => {
+            let byte = parse_c_char_literal(raw)?;
+            Some(if *signed {
+                (byte as i8).to_string()
+            } else {
+                byte.to_string()
+            })
         }
         VarMeta::Set => {
             // raw might already be `[...]` from decode_set_bitmask, or a struct dump.
@@ -1034,6 +1101,20 @@ mod tests {
     fn parse_non_variable_line() {
         assert_eq!(parse_variable_line("Process 1234 stopped"), None);
         assert_eq!(parse_variable_line("(lldb) frame variable"), None);
+    }
+
+    #[test]
+    fn int8_metadata_shows_numbers_not_chars() {
+        let byte = VarMeta::Int8 { signed: false };
+        let short = VarMeta::Int8 { signed: true };
+        let raw = raw_variable_value("(unsigned char) b = '\\xc8'").unwrap();
+        assert_eq!(format_with_meta(&byte, &raw).as_deref(), Some("200"));
+        let raw = raw_variable_value("(char) si = '\\xfb'").unwrap();
+        assert_eq!(format_with_meta(&short, &raw).as_deref(), Some("-5"));
+        assert_eq!(format_with_meta(&byte, "'A'").as_deref(), Some("65"));
+        assert_eq!(format_with_meta(&byte, "'\\0'").as_deref(), Some("0"));
+        assert_eq!(format_with_meta(&byte, "'\\n'").as_deref(), Some("10"));
+        assert_eq!(format_with_meta(&byte, "'\\x01'").as_deref(), Some("1"));
     }
 
     #[test]
