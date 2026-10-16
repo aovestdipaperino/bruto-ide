@@ -184,11 +184,13 @@ impl ProfilePanel {
         self.rows.len()
     }
 
-    /// Source line of the selected row, if any.
+    /// Source line of the selected row, if any (none for a line in a
+    /// unit: the profiled editor holds the program).
     pub fn selected_line(&self) -> Option<usize> {
         let p = self.profile.as_ref()?;
         let row = self.rows.get(self.selected)?;
-        Some(p.nodes[row.node].line)
+        let node = &p.nodes[row.node];
+        node.file.is_none().then_some(node.line)
     }
 
     /// Drain the latest jump request (a 1-based source line).
@@ -321,9 +323,17 @@ impl View for ProfilePanel {
             } else {
                 "  "
             };
-            let label = match node.kind {
-                ProfileKind::Routine => node.name.clone(),
-                ProfileKind::Line => format!("line {}", node.line),
+            // A unit's routines and lines name their file.
+            let file = node.file.as_deref().map(|f| {
+                std::path::Path::new(f)
+                    .file_name()
+                    .map_or_else(|| f.to_string(), |n| n.to_string_lossy().into_owned())
+            });
+            let label = match (node.kind, file) {
+                (ProfileKind::Routine, None) => node.name.clone(),
+                (ProfileKind::Routine, Some(f)) => format!("{} ({f})", node.name),
+                (ProfileKind::Line, None) => format!("line {}", node.line),
+                (ProfileKind::Line, Some(f)) => format!("line {} ({f})", node.line),
             };
             let mut left = format!("{}{}{}", " ".repeat(row.depth * 2), marker, label);
 
@@ -408,6 +418,7 @@ mod tests {
             kind,
             name: name.into(),
             line,
+            file: None,
             parent,
             calls: 1,
             self_ns: total / 2,

@@ -1114,12 +1114,8 @@ fn handle_build(
     ide: &mut IdeState,
     build_options: BuildOptions,
 ) {
-    let Some(editor) = focused_editor(app) else {
-        append_output_line(
-            output,
-            "No active editor — open or create a file first.",
-            Some(CONSOLE_INFO),
-        );
+    output.clear();
+    let Some(editor) = build_target(app, language, output) else {
         return;
     };
     let source = editor.borrow().editor_rc().borrow().get_text();
@@ -1131,7 +1127,6 @@ fn handle_build(
         ide.debugger.is_running(),
         ide.debug_editor.is_some()
     );
-    output.clear();
     append_output_line(
         output,
         &format!("Building ({})...", build_options.describe()),
@@ -1445,14 +1440,6 @@ fn handle_profile(
     output: &mut TerminalWidget,
     ide: &mut IdeState,
 ) {
-    let Some(editor) = focused_editor(app) else {
-        append_output_line(
-            output,
-            "No active editor — open or create a file first.",
-            Some(CONSOLE_INFO),
-        );
-        return;
-    };
     if ide.debugger.is_running() {
         append_output_line(
             output,
@@ -1461,9 +1448,12 @@ fn handle_profile(
         );
         return;
     }
+    output.clear();
+    let Some(editor) = build_target(app, language, output) else {
+        return;
+    };
     let source = editor.borrow().editor_rc().borrow().get_text();
     let file_path = editor.borrow().file_path().map(std::path::PathBuf::from);
-    output.clear();
     append_output_line(output, "Building with profiler...", Some(CONSOLE_INFO));
     editor.borrow_mut().set_build_error(None);
     editor.borrow_mut().set_line_profile(None);
@@ -1651,7 +1641,8 @@ fn handle_debug_start_continue(
         return;
     };
 
-    let Some(editor) = focused_editor(app) else {
+    // The editor just built (a unit's program, when a unit was focused).
+    let Some(editor) = ide.built_editor.clone() else {
         append_output_line(output, "No active editor.", Some(ERROR));
         return;
     };
@@ -1846,6 +1837,80 @@ fn format_status_error(message: &str) -> String {
 
 /// Find the first child of the desktop that is both a `SharedIdeEditorWindow`
 /// wrapper and currently focused, and return its underlying `Rc`.
+/// The editor a build, run, debug session or profile works on: the
+/// focused one, or when that holds a library (a Pascal unit), an open
+/// program, one that uses the library first. `None` (with the reason in
+/// `output`) when there is none.
+fn build_target(
+    app: &mut Application,
+    language: &Box<dyn Language>,
+    output: &mut TerminalWidget,
+) -> Option<Rc<RefCell<IdeEditorWindow>>> {
+    let Some(editor) = focused_editor(app) else {
+        append_output_line(
+            output,
+            "No active editor — open or create a file first.",
+            Some(CONSOLE_INFO),
+        );
+        return None;
+    };
+    let source = editor.borrow().editor_rc().borrow().get_text();
+    let Some(library) = language.library_name(&source) else {
+        return Some(editor);
+    };
+    let mut programs = Vec::new();
+    for i in 0..app.desktop.child_count() {
+        if let Some(shared) = app
+            .desktop
+            .child_at(i)
+            .as_any()
+            .downcast_ref::<SharedIdeEditorWindow>()
+        {
+            let other = Rc::clone(shared.inner());
+            let text = other.borrow().editor_rc().borrow().get_text();
+            if language.library_name(&text).is_none() {
+                let uses_it = language.used_libraries(&text).contains(&library);
+                programs.push((uses_it, other));
+            }
+        }
+    }
+    // A program using the library, else any; the most recently raised
+    // (later desktop children are in front).
+    let chosen = programs
+        .iter()
+        .rev()
+        .find(|(uses_it, _)| *uses_it)
+        .or_else(|| programs.last())
+        .map(|(_, e)| Rc::clone(e));
+    let name = |e: &Rc<RefCell<IdeEditorWindow>>| {
+        e.borrow()
+            .file_path()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "the program".to_string())
+    };
+    match chosen {
+        Some(program) => {
+            append_output_line(
+                output,
+                &format!("{} is a unit: using {}.", name(&editor), name(&program)),
+                Some(CONSOLE_INFO),
+            );
+            Some(program)
+        }
+        None => {
+            append_output_line(
+                output,
+                &format!(
+                    "{} is a unit, not a program: open the program that uses it.",
+                    name(&editor)
+                ),
+                Some(ERROR),
+            );
+            None
+        }
+    }
+}
+
 fn focused_editor(app: &mut Application) -> Option<Rc<RefCell<IdeEditorWindow>>> {
     for i in 0..app.desktop.child_count() {
         let child = app.desktop.child_at(i);
