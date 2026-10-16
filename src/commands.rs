@@ -14,6 +14,13 @@ pub const CM_BUILD_RUN: u16 = 402;
 /// Open the Build Options dialog (Debug/Retail, optimization goal)
 pub const CM_BUILD_OPTIONS: u16 = 403;
 
+/// Choose the primary file: the program Build, Run, Debug and Profile
+/// always work on, whichever window is focused (Turbo Pascal's)
+pub const CM_PRIMARY_FILE: u16 = 404;
+
+/// Forget the primary file: work on the focused window again
+pub const CM_CLEAR_PRIMARY_FILE: u16 = 405;
+
 /// Start or continue debugging (F5)
 pub const CM_DEBUG_START: u16 = 410;
 

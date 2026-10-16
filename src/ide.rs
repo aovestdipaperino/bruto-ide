@@ -18,7 +18,7 @@ use crate::watch_window::WatchPanel;
 use bruto_lang::language::{BuildOptions, BuildPhase, BuildProfile, BuildResult, Language};
 
 use std::cell::RefCell;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -72,6 +72,13 @@ pub struct IdeOptions {
     /// Invoked whenever the user confirms new options in Build → Options…,
     /// so the host can persist them.
     pub on_build_options_changed: Option<Box<dyn FnMut(&BuildOptions)>>,
+    /// The primary file the IDE starts with (Build → Primary file…): the
+    /// program Build, Run, Debug and Profile work on, whichever window is
+    /// focused. The host typically loads it from its config file.
+    pub primary_file: Option<PathBuf>,
+    /// Invoked whenever the user sets or clears the primary file, so the
+    /// host can persist it.
+    pub on_primary_file_changed: Option<Box<dyn FnMut(Option<&Path>)>>,
 }
 
 impl Default for IdeOptions {
@@ -83,6 +90,8 @@ impl Default for IdeOptions {
             on_desktop_ready: None,
             build_options: BuildOptions::default(),
             on_build_options_changed: None,
+            primary_file: None,
+            on_primary_file_changed: None,
         }
     }
 }
@@ -178,6 +187,10 @@ struct IdeState {
     build_options: BuildOptions,
     /// Host hook fired after the user changes `build_options`.
     on_build_options_changed: Option<Box<dyn FnMut(&BuildOptions)>>,
+    /// The primary file (Build → Primary file…), if set.
+    primary_file: Option<PathBuf>,
+    /// Host hook fired after the user sets or clears `primary_file`.
+    on_primary_file_changed: Option<Box<dyn FnMut(Option<&Path>)>>,
 }
 
 /// Wrap a fresh Watches `Window` around the shared [`WatchPanel`] and add it
@@ -416,6 +429,8 @@ pub fn run_with_options(
         profile_editor: None,
         build_options: options.build_options,
         on_build_options_changed: options.on_build_options_changed.take(),
+        primary_file: options.primary_file.take(),
+        on_primary_file_changed: options.on_primary_file_changed.take(),
     };
 
     // ── Event loop ───────────────────────────────────────
@@ -888,6 +903,14 @@ fn handle_command(
             handle_build(app, language, &mut output_rc.borrow_mut(), ide, opts);
             true
         }
+        CM_PRIMARY_FILE => {
+            handle_set_primary_file(app, ide, &mut output_rc.borrow_mut());
+            true
+        }
+        CM_CLEAR_PRIMARY_FILE => {
+            set_primary_file(ide, None, &mut output_rc.borrow_mut());
+            true
+        }
         CM_BUILD_OPTIONS => {
             if let Some(new_opts) =
                 crate::build_options_dialog::prompt_build_options(app, ide.build_options)
@@ -1115,7 +1138,7 @@ fn handle_build(
     build_options: BuildOptions,
 ) {
     output.clear();
-    let Some(editor) = build_target(app, language, output) else {
+    let Some(editor) = build_target(app, language, ide, output) else {
         return;
     };
     let source = editor.borrow().editor_rc().borrow().get_text();
@@ -1449,7 +1472,7 @@ fn handle_profile(
         return;
     }
     output.clear();
-    let Some(editor) = build_target(app, language, output) else {
+    let Some(editor) = build_target(app, language, ide, output) else {
         return;
     };
     let source = editor.borrow().editor_rc().borrow().get_text();
@@ -1767,8 +1790,11 @@ fn update_command_states(app: &mut Application, ide: &IdeState) {
     // Editor-bound commands
     toggle(CM_SAVE, editor_focused);
     toggle(CM_SAVE_AS, editor_focused);
-    toggle(CM_BUILD, editor_focused);
-    toggle(CM_RUN, editor_focused);
+    // With a primary file, building needs no focused editor.
+    let can_build = editor_focused || ide.primary_file.is_some();
+    toggle(CM_BUILD, can_build);
+    toggle(CM_RUN, can_build);
+    toggle(CM_CLEAR_PRIMARY_FILE, ide.primary_file.is_some());
     toggle(CM_CLOSE_EDITOR, editor_focused);
 
     // Edit menu. Undo / Redo follow the focused editor's stack state so
@@ -1787,7 +1813,7 @@ fn update_command_states(app: &mut Application, ide: &IdeState) {
     // CM_DEBUG_START is the same menu entry as continue (~S~tart / Continue);
     // the handler dispatches based on dbg_running, so we keep it enabled in
     // both states as long as there's an editor to operate on.
-    toggle(CM_DEBUG_START, editor_focused);
+    toggle(CM_DEBUG_START, can_build);
     toggle(CM_DEBUG_CONTINUE, dbg_running);
     toggle(CM_DEBUG_STEP_OVER, dbg_running);
     toggle(CM_DEBUG_STEP_INTO, dbg_running);
@@ -1797,7 +1823,7 @@ fn update_command_states(app: &mut Application, ide: &IdeState) {
     toggle(CM_SHOW_WATCHES, !watch_open);
     toggle(CM_SHOW_OUTPUT, !output_open);
     toggle(CM_SHOW_CALLSTACK, !callstack_open);
-    toggle(CM_PROFILE, editor_focused && !dbg_running);
+    toggle(CM_PROFILE, can_build && !dbg_running);
     toggle(CM_SHOW_PROFILE, !profile_open);
     toggle(CM_TOGGLE_PROFILE_COLUMN, has_profile);
     toggle(CM_SHOW_DISASSEMBLY, !disasm_open && has_build);
@@ -1837,15 +1863,100 @@ fn format_status_error(message: &str) -> String {
 
 /// Find the first child of the desktop that is both a `SharedIdeEditorWindow`
 /// wrapper and currently focused, and return its underlying `Rc`.
-/// The editor a build, run, debug session or profile works on: the
-/// focused one, or when that holds a library (a Pascal unit), an open
-/// program, one that uses the library first. `None` (with the reason in
-/// `output`) when there is none.
+/// Build → Primary file…: choose the program to build, whichever window
+/// is focused.
+fn handle_set_primary_file(app: &mut Application, ide: &mut IdeState, output: &mut TerminalWidget) {
+    let bounds = centered_dialog_bounds(app);
+    let mut dialog = FileDialogBuilder::new()
+        .bounds(bounds)
+        .title("Primary File")
+        .wildcard(ide.save_wildcard.clone())
+        .button_label("~O~K")
+        .hidden_toggle(true)
+        .build();
+    if let Some(path) = dialog.execute(app) {
+        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        set_primary_file(ide, Some(path), output);
+    }
+}
+
+/// Set or clear the primary file, telling the host and the user.
+fn set_primary_file(ide: &mut IdeState, path: Option<PathBuf>, output: &mut TerminalWidget) {
+    match &path {
+        Some(p) => append_output_line(
+            output,
+            &format!("Primary file: {}", p.display()),
+            Some(CONSOLE_INFO),
+        ),
+        None => append_output_line(
+            output,
+            "Primary file cleared: building the focused window.",
+            Some(CONSOLE_INFO),
+        ),
+    }
+    if let Some(cb) = ide.on_primary_file_changed.as_mut() {
+        cb(path.as_deref());
+    }
+    ide.primary_file = path;
+}
+
+/// The editor showing `path`, opened (behind the focused window's
+/// focus) if it isn't. `None`, with the reason in `output`, when it
+/// can't be read.
+fn editor_for_path(
+    app: &mut Application,
+    language: &Box<dyn Language>,
+    ide: &IdeState,
+    path: &Path,
+    output: &mut TerminalWidget,
+) -> Option<Rc<RefCell<IdeEditorWindow>>> {
+    if let Some(i) = find_editor_with_path(app, path) {
+        return app
+            .desktop
+            .child_at(i)
+            .as_any()
+            .downcast_ref::<SharedIdeEditorWindow>()
+            .map(|s| Rc::clone(s.inner()));
+    }
+    let editor = make_editor(language, ide);
+    if let Err(e) = editor.borrow_mut().load(path.to_path_buf()) {
+        append_output_line(
+            output,
+            &format!("Cannot open {}: {e}", path.display()),
+            Some(ERROR),
+        );
+        return None;
+    }
+    install_editor(app, Rc::clone(&editor));
+    Some(editor)
+}
+
+/// The editor a build, run, debug session or profile works on, as in
+/// Turbo Pascal: the primary file when one is set (opened if it isn't),
+/// else the focused window; when that holds a library (a Pascal unit), a
+/// program using it: an open one, else one in the library's folder, which
+/// is opened. `None` (with the reason in `output`) when there is none.
 fn build_target(
     app: &mut Application,
     language: &Box<dyn Language>,
+    ide: &IdeState,
     output: &mut TerminalWidget,
 ) -> Option<Rc<RefCell<IdeEditorWindow>>> {
+    if let Some(primary) = ide.primary_file.clone() {
+        let editor = editor_for_path(app, language, ide, &primary, output)?;
+        append_output_line(
+            output,
+            &format!(
+                "Primary file: {}",
+                primary.file_name().map_or_else(
+                    || primary.display().to_string(),
+                    |n| n.to_string_lossy().into_owned()
+                )
+            ),
+            Some(CONSOLE_INFO),
+        );
+        return Some(editor);
+    }
     let Some(editor) = focused_editor(app) else {
         append_output_line(
             output,
@@ -1858,7 +1969,20 @@ fn build_target(
     let Some(library) = language.library_name(&source) else {
         return Some(editor);
     };
-    let mut programs = Vec::new();
+    let file_name = |path: &Path| {
+        path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        )
+    };
+    let unit_path = editor.borrow().file_path();
+    let unit_name = unit_path
+        .as_deref()
+        .map_or_else(|| "This window".to_string(), file_name);
+
+    // An open program using it, the most recently raised first (later
+    // desktop children are in front).
+    let mut open_program = None;
     for i in 0..app.desktop.child_count() {
         if let Some(shared) = app
             .desktop
@@ -1868,47 +1992,77 @@ fn build_target(
         {
             let other = Rc::clone(shared.inner());
             let text = other.borrow().editor_rc().borrow().get_text();
-            if language.library_name(&text).is_none() {
-                let uses_it = language.used_libraries(&text).contains(&library);
-                programs.push((uses_it, other));
+            if language.library_name(&text).is_none()
+                && language.used_libraries(&text).contains(&library)
+            {
+                open_program = Some(other);
             }
         }
     }
-    // A program using the library, else any; the most recently raised
-    // (later desktop children are in front).
-    let chosen = programs
-        .iter()
-        .rev()
-        .find(|(uses_it, _)| *uses_it)
-        .or_else(|| programs.last())
-        .map(|(_, e)| Rc::clone(e));
-    let name = |e: &Rc<RefCell<IdeEditorWindow>>| {
-        e.borrow()
+    if let Some(program) = open_program {
+        let name = program
+            .borrow()
             .file_path()
-            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-            .unwrap_or_else(|| "the program".to_string())
-    };
-    match chosen {
-        Some(program) => {
-            append_output_line(
-                output,
-                &format!("{} is a unit: using {}.", name(&editor), name(&program)),
-                Some(CONSOLE_INFO),
-            );
-            Some(program)
-        }
-        None => {
-            append_output_line(
-                output,
-                &format!(
-                    "{} is a unit, not a program: open the program that uses it.",
-                    name(&editor)
-                ),
-                Some(ERROR),
-            );
-            None
-        }
+            .map_or_else(|| "the program".to_string(), |p| file_name(&p));
+        append_output_line(
+            output,
+            &format!(
+                "{unit_name} is a unit: using {name} (Build > Primary file sets the program \
+                 to build)."
+            ),
+            Some(CONSOLE_INFO),
+        );
+        return Some(program);
     }
+
+    // A program in the unit's folder using it (first by name), opened.
+    let found = unit_path
+        .as_deref()
+        .and_then(Path::parent)
+        .and_then(|dir| program_using(language, dir, &library));
+    let Some(path) = found else {
+        append_output_line(
+            output,
+            &format!(
+                "{unit_name} is a unit, and no program using it is open or in its folder: \
+                 set one with Build > Primary file."
+            ),
+            Some(ERROR),
+        );
+        return None;
+    };
+    let program = editor_for_path(app, language, ide, &path, output)?;
+    append_output_line(
+        output,
+        &format!(
+            "{unit_name} is a unit: opened {}, which uses it (Build > Primary file \
+             sets the program to build).",
+            file_name(&path)
+        ),
+        Some(CONSOLE_INFO),
+    );
+    Some(program)
+}
+
+/// The first program (by file name) in `dir` that uses `library`.
+fn program_using(language: &Box<dyn Language>, dir: &Path, library: &str) -> Option<PathBuf> {
+    let ext = language.file_extension().to_ascii_lowercase();
+    let mut candidates: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.is_file()
+                && p.extension()
+                    .is_some_and(|e| e.to_string_lossy().to_ascii_lowercase() == ext)
+        })
+        .collect();
+    candidates.sort();
+    candidates.into_iter().find(|p| {
+        std::fs::read_to_string(p).is_ok_and(|text| {
+            language.library_name(&text).is_none()
+                && language.used_libraries(&text).iter().any(|u| u == library)
+        })
+    })
 }
 
 fn focused_editor(app: &mut Application) -> Option<Rc<RefCell<IdeEditorWindow>>> {
@@ -2392,6 +2546,9 @@ fn build_menu_bar(width: i16) -> MenuBar {
         item("~R~un", CM_RUN, 0, "Ctrl-F9"),
         MenuItem::separator(),
         item("~O~ptions...", CM_BUILD_OPTIONS, 0, ""),
+        MenuItem::separator(),
+        item("~P~rimary file...", CM_PRIMARY_FILE, 0, ""),
+        item("C~l~ear primary file", CM_CLEAR_PRIMARY_FILE, 0, ""),
     ]);
     let debug_menu = Menu::from_items(vec![
         item("~S~tart / Continue", CM_DEBUG_START, KB_F5, "F5"),
