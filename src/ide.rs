@@ -644,7 +644,16 @@ pub fn run_with_options(
                             let shift = event
                                 .key_modifiers
                                 .contains(crossterm::event::KeyModifiers::SHIFT);
-                            event = Event::command(if shift { CM_PROFILE } else { CM_BUILD });
+                            let alt = event
+                                .key_modifiers
+                                .contains(crossterm::event::KeyModifiers::ALT);
+                            event = Event::command(if alt {
+                                CM_COMPILE
+                            } else if shift {
+                                CM_PROFILE
+                            } else {
+                                CM_BUILD
+                            });
                         }
                         KB_F5 => {
                             event = Event::command(CM_DEBUG_START);
@@ -896,6 +905,10 @@ fn handle_command(
         }
         CM_SAVE_AS => {
             handle_save_as(app, ide);
+            true
+        }
+        CM_COMPILE => {
+            handle_compile(app, language, &mut output_rc.borrow_mut());
             true
         }
         CM_BUILD => {
@@ -1793,6 +1806,7 @@ fn update_command_states(app: &mut Application, ide: &IdeState) {
     // With a primary file, building needs no focused editor.
     let can_build = editor_focused || ide.primary_file.is_some();
     toggle(CM_BUILD, can_build);
+    toggle(CM_COMPILE, editor_focused);
     toggle(CM_RUN, can_build);
     toggle(CM_CLEAR_PRIMARY_FILE, ide.primary_file.is_some());
     toggle(CM_CLOSE_EDITOR, editor_focused);
@@ -1863,6 +1877,49 @@ fn format_status_error(message: &str) -> String {
 
 /// Find the first child of the desktop that is both a `SharedIdeEditorWindow`
 /// wrapper and currently focused, and return its underlying `Rc`.
+/// Build → Compile (Alt-F9), as in Turbo Pascal: compile the focused
+/// window's text without linking or running it, a unit on its own,
+/// whatever the primary file.
+fn handle_compile(
+    app: &mut Application,
+    language: &Box<dyn Language>,
+    output: &mut TerminalWidget,
+) {
+    let Some(editor) = focused_editor(app) else {
+        append_output_line(
+            output,
+            "No active editor — open or create a file first.",
+            Some(CONSOLE_INFO),
+        );
+        return;
+    };
+    let source = editor.borrow().editor_rc().borrow().get_text();
+    let path = editor.borrow().file_path();
+    let name = path.as_deref().and_then(Path::file_name).map_or_else(
+        || "Untitled".to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    output.clear();
+    append_output_line(output, &format!("Compiling {name}..."), Some(CONSOLE_INFO));
+    editor.borrow_mut().set_build_error(None);
+    match language.check_at(&source, path.as_deref()) {
+        None => append_output_line(
+            output,
+            "Compile is not available for this language.",
+            Some(CONSOLE_INFO),
+        ),
+        Some(Ok(summary)) => {
+            append_output_line(output, &format!("{name}: {summary}."), Some(SUCCESS))
+        }
+        Some(Err(e)) => {
+            if let Some(line) = extract_error_line(&e) {
+                editor.borrow_mut().set_build_error(Some((line, e.clone())));
+            }
+            append_output_line(output, &format!("Compile error: {e}"), Some(ERROR));
+        }
+    }
+}
+
 /// Build → Primary file…: choose the program to build, whichever window
 /// is focused.
 fn handle_set_primary_file(app: &mut Application, ide: &mut IdeState, output: &mut TerminalWidget) {
@@ -2542,6 +2599,7 @@ fn build_menu_bar(width: i16) -> MenuBar {
         item("Select ~A~ll", CM_SELECT_ALL, 0, "Ctrl-A"),
     ]);
     let build_menu = Menu::from_items(vec![
+        item("~C~ompile", CM_COMPILE, 0, "Alt-F9"),
         item("~B~uild", CM_BUILD, KB_F9, "F9"),
         item("~R~un", CM_RUN, 0, "Ctrl-F9"),
         MenuItem::separator(),

@@ -21,6 +21,10 @@ pub const CM_PRIMARY_FILE: u16 = 404;
 /// Forget the primary file: work on the focused window again
 pub const CM_CLEAR_PRIMARY_FILE: u16 = 405;
 
+/// Compile the focused window's file without linking or running it; a
+/// unit is checked on its own (Alt+F9, Turbo Pascal's Compile)
+pub const CM_COMPILE: u16 = 406;
+
 /// Start or continue debugging (F5)
 pub const CM_DEBUG_START: u16 = 410;
 
