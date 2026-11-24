@@ -1,5 +1,7 @@
 # Bruto IDE
 
+[![GitHub stars](https://img.shields.io/github/stars/aovestdipaperino/bruto-ide?logo=github&color=brightgreen)](https://github.com/aovestdipaperino/bruto-ide/stargazers)
+
 A pluggable TUI IDE framework built with [Turbo Vision for Rust](https://github.com/aovestdipaperino/turbo-vision-4-rust).
 
 Bruto IDE provides the complete shell for a text-mode development environment: editor with breakpoint gutter, lldb-based debugger, variable watch panel, output panel, menus, and keyboard shortcuts. It knows nothing about any specific programming language. You plug in a language by implementing a single trait.
